@@ -1,0 +1,254 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Plan {
+  FREE
+  PLUS
+  PRO
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  EXPIRED
+  PAST_DUE
+}
+
+enum ChatMode {
+  CLASSIC
+  CINEMATIC
+  DIALOGUE_FOCUS
+  SLOW_BURN
+  ADVENTURE_GM
+  DARK_DRAMA
+  ADULT
+  PHOTO_SCENE
+}
+
+enum ChatStatus {
+  ACTIVE
+  ARCHIVED
+  DELETED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum PaymentProvider {
+  TELEGRAM_STARS
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum ModerationSeverity {
+  INFO
+  WARNING
+  BLOCKED
+}
+
+enum ImageStatus {
+  QUEUED
+  GENERATED
+  FAILED
+}
+
+model User {
+  id              String            @id @default(cuid())
+  telegramId      String?           @unique
+  username        String?
+  displayName     String?
+  ageVerifiedAt   DateTime?
+  termsAcceptedAt DateTime?
+  privacyAcceptedAt DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  subscriptions   Subscription[]
+  payments        Payment[]
+  characters      Character[]
+  chats           Chat[]
+  messages        Message[]
+  usageEvents     UsageEvent[]
+  snapshots       ContextSnapshot[]
+  moderation      ModerationEvent[]
+  images          ImageGeneration[]
+}
+
+model Subscription {
+  id        String             @id @default(cuid())
+  userId    String
+  plan      Plan               @default(FREE)
+  status    SubscriptionStatus @default(ACTIVE)
+  startsAt  DateTime           @default(now())
+  endsAt    DateTime?
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+}
+
+model Payment {
+  id                String          @id @default(cuid())
+  userId            String
+  provider          PaymentProvider @default(TELEGRAM_STARS)
+  providerPaymentId String?
+  plan              Plan
+  amount            Int
+  currency          String          @default("XTR")
+  status            PaymentStatus   @default(PENDING)
+  payload           Json?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+}
+
+model Character {
+  id           String   @id @default(cuid())
+  userId       String
+  name         String
+  age          Int
+  description  String
+  appearance   String?
+  personality  String?
+  speechStyle  String?
+  setting      String?
+  boundaries   String?
+  starterScene String?
+  isAdultReady Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chatLinks    ChatCharacter[]
+
+  @@index([userId, createdAt])
+}
+
+model Chat {
+  id               String            @id @default(cuid())
+  userId           String
+  title            String
+  mode             ChatMode          @default(CLASSIC)
+  status           ChatStatus        @default(ACTIVE)
+  adultMessageCount Int              @default(0)
+  memorySummary    String?
+  lorebook         String?
+  importedContext  String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  characters       ChatCharacter[]
+  messages         Message[]
+  snapshots        ContextSnapshot[]
+  images           ImageGeneration[]
+
+  @@index([userId, status])
+}
+
+model ChatCharacter {
+  chatId      String
+  characterId String
+  chat        Chat      @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  @@id([chatId, characterId])
+}
+
+model Message {
+  id        String      @id @default(cuid())
+  userId    String
+  chatId    String
+  role      MessageRole
+  content   String
+  tokensIn  Int?
+  tokensOut Int?
+  provider  String?
+  model     String?
+  createdAt DateTime    @default(now())
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chat      Chat        @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  @@index([chatId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model PromptTemplate {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  content   String
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model UsageEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  amount    Int      @default(1)
+  metadata  Json?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type, createdAt])
+}
+
+model ContextSnapshot {
+  id        String   @id @default(cuid())
+  userId    String
+  chatId    String
+  fullText  String
+  summary   String
+  facts     String
+  prompt    String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  @@index([chatId, createdAt])
+}
+
+model ModerationEvent {
+  id        String             @id @default(cuid())
+  userId    String
+  severity  ModerationSeverity
+  reason    String
+  input     String?
+  createdAt DateTime           @default(now())
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, severity, createdAt])
+}
+
+model ImageGeneration {
+  id        String      @id @default(cuid())
+  userId    String
+  chatId    String?
+  prompt    String
+  provider  String
+  model     String
+  status    ImageStatus @default(QUEUED)
+  imageUrl  String?
+  error     String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chat      Chat?       @relation(fields: [chatId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+}
