@@ -1,15 +1,26 @@
 import { exportContext } from "@/domain/context-export";
+import type { PromptCharacter, PromptMessage } from "@/domain/prompts";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/server/auth";
 import { handleApiError, jsonError, jsonOk } from "@/server/api";
 
 export const runtime = "nodejs";
 
+type ChatForContextExport = {
+  id: string;
+  title: string;
+  mode: string;
+  lorebook: string | null;
+  memorySummary: string | null;
+  characters: Array<{ character: PromptCharacter }>;
+  messages: Array<{ role: "USER" | "ASSISTANT" | "SYSTEM"; content: string }>;
+};
+
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params;
     const user = await getCurrentUser(request);
-    const chat = await prisma.chat.findFirst({
+    const chat: ChatForContextExport | null = await prisma.chat.findFirst({
       where: { id, userId: user.id, status: { not: "DELETED" } },
       include: {
         characters: { include: { character: true } },
@@ -24,7 +35,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       characters: chat.characters.map(({ character }) => character),
       lorebook: chat.lorebook,
       memorySummary: chat.memorySummary,
-      messages: chat.messages.map((message) => ({
+      messages: chat.messages.map((message): PromptMessage => ({
         role: message.role === "ASSISTANT" ? "assistant" : message.role === "SYSTEM" ? "system" : "user",
         content: message.content
       }))

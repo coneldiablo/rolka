@@ -71,6 +71,7 @@ model User {
   telegramId      String?           @unique
   username        String?
   displayName     String?
+  isAdmin         Boolean           @default(false)
   ageVerifiedAt   DateTime?
   termsAcceptedAt DateTime?
   privacyAcceptedAt DateTime?

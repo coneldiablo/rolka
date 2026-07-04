@@ -1,0 +1,12 @@
+.git
+.next
+node_modules
+coverage
+dist
+*.tsbuildinfo
+.env
+.env*.local
+.DS_Store
+.playwright-mcp
+rolka-*.png
+bot-polling*.log

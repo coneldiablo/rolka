@@ -4,12 +4,19 @@ import { buildPrompt, type PromptCharacter, type PromptMessage } from "@/domain/
 import { createConfiguredTextProviders, generateWithFallback } from "@/domain/providers";
 import { validateAdultCharacters, validateSafetyText } from "@/domain/safety";
 import type { RpMode } from "@/domain/modes";
+import { prisma } from "@/lib/prisma";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 
 const appUrl = process.env.TELEGRAM_MINI_APP_URL ?? process.env.APP_URL;
+const configuredAdminTelegramIds = new Set(
+  (process.env.ADMIN_TELEGRAM_IDS ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean)
+);
 
-type AwaitingInput = "context" | "userProfile" | "aiCharacter" | "savedCharacter" | null;
+type AwaitingInput = "context" | "userProfile" | "aiCharacter" | "savedCharacter" | "adminAddAdmin" | null;
 
 type SavedCharacter = PromptCharacter & {
   id: string;
@@ -17,6 +24,7 @@ type SavedCharacter = PromptCharacter & {
 
 type UserRuntimeProfile = {
   plan: Plan;
+  isAdmin: boolean;
   ageVerifiedAt?: Date;
   termsAcceptedAt?: Date;
   privacyAcceptedAt?: Date;
@@ -87,6 +95,7 @@ export function createBot() {
   bot.command("start", async (ctx) => {
     if (ctx.from?.id) {
       getUserProfile(ctx.from.id);
+      await syncTelegramUser(ctx.from);
       resetChatState(ctx.from.id);
     }
     await ctx.reply(startText(ctx.from?.first_name), {
@@ -96,9 +105,20 @@ export function createBot() {
   });
 
   bot.command("menu", async (ctx) => {
+    if (ctx.from?.id) await syncTelegramUser(ctx.from);
     await ctx.reply("Главное меню Rolka:", {
       parse_mode: "HTML",
       reply_markup: mainMenuKeyboard()
+    });
+  });
+
+  bot.command("admin", async (ctx) => {
+    if (!ctx.from?.id) return;
+    await syncTelegramUser(ctx.from);
+    if (!(await isAdminUser(ctx.from.id))) return;
+    await ctx.reply(await adminPanelText(), {
+      parse_mode: "HTML",
+      reply_markup: adminPanelKeyboard()
     });
   });
 
@@ -474,6 +494,65 @@ export function createBot() {
     });
   });
 
+  bot.callbackQuery("admin_panel", async (ctx) => {
+    if (!(await isAdminUser(ctx.from.id))) return;
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(await adminPanelText(), {
+      parse_mode: "HTML",
+      reply_markup: adminPanelKeyboard()
+    });
+  });
+
+  bot.callbackQuery("admin_stats", async (ctx) => {
+    if (!(await isAdminUser(ctx.from.id))) return;
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(await adminStatsText(), {
+      parse_mode: "HTML",
+      reply_markup: adminPanelKeyboard()
+    });
+  });
+
+  bot.callbackQuery("admin_users", async (ctx) => {
+    if (!(await isAdminUser(ctx.from.id))) return;
+    await ctx.answerCallbackQuery();
+    const users = await listAdminUsers();
+    await ctx.editMessageText(await adminUsersText(users), {
+      parse_mode: "HTML",
+      reply_markup: adminUsersKeyboard(users)
+    });
+  });
+
+  bot.callbackQuery(/^admin_user:/, async (ctx) => {
+    if (!(await isAdminUser(ctx.from.id))) return;
+    await ctx.answerCallbackQuery();
+    const telegramId = ctx.callbackQuery.data.replace("admin_user:", "");
+    await ctx.editMessageText(await adminUserText(telegramId), {
+      parse_mode: "HTML",
+      reply_markup: adminUserKeyboard(telegramId)
+    });
+  });
+
+  bot.callbackQuery(/^admin_grant:/, async (ctx) => {
+    if (!(await isAdminUser(ctx.from.id))) return;
+    const [, telegramId, plan] = ctx.callbackQuery.data.split(":") as [string, string, Plan];
+    await grantPlanByTelegramId(telegramId, plan);
+    await ctx.answerCallbackQuery(`Доступ ${plan} выдан`);
+    await ctx.editMessageText(await adminUserText(telegramId), {
+      parse_mode: "HTML",
+      reply_markup: adminUserKeyboard(telegramId)
+    });
+  });
+
+  bot.callbackQuery("admin_add_admin", async (ctx) => {
+    if (!(await isAdminUser(ctx.from.id))) return;
+    await ctx.answerCallbackQuery();
+    getChatState(ctx.from.id).awaiting = "adminAddAdmin";
+    await ctx.editMessageText(adminAddAdminText(), {
+      parse_mode: "HTML",
+      reply_markup: adminPanelKeyboard()
+    });
+  });
+
   bot.on("pre_checkout_query", async (ctx) => {
     await ctx.answerPreCheckoutQuery(true);
   });
@@ -481,7 +560,10 @@ export function createBot() {
   bot.on("message:successful_payment", async (ctx) => {
     if (ctx.from?.id) {
       const payload = ctx.message.successful_payment.invoice_payload;
-      getUserProfile(ctx.from.id).plan = payload.includes("PRO") ? "PRO" : "PLUS";
+      const plan = payload.includes("PRO") ? "PRO" : "PLUS";
+      getUserProfile(ctx.from.id).plan = plan;
+      await syncTelegramUser(ctx.from);
+      await recordSuccessfulPayment(ctx.from.id, plan, ctx.message.successful_payment.telegram_payment_charge_id, payload);
     }
     await ctx.reply("✅ <b>Подписка активирована.</b>\n\nЛимиты обновлены в текущей Telegram-сессии.", {
       parse_mode: "HTML",
@@ -726,6 +808,34 @@ function subscriptionKeyboard() {
     .text(`Pro · ${getPlanPriceStars("PRO")} Stars`, "subscribe_pro")
     .row()
     .text("← Главное меню", "main_menu");
+}
+
+function adminPanelKeyboard() {
+  return new InlineKeyboard()
+    .text("Участники", "admin_users")
+    .text("Продажи", "admin_stats")
+    .row()
+    .text("Добавить админа", "admin_add_admin");
+}
+
+function adminUsersKeyboard(users: Array<{ telegramId: string | null; displayName: string | null; username: string | null }>) {
+  const keyboard = new InlineKeyboard();
+  users.forEach((user) => {
+    if (!user.telegramId) return;
+    keyboard.text(adminUserLabel(user), `admin_user:${user.telegramId}`).row();
+  });
+  return keyboard.text("Обновить", "admin_users").text("← Админка", "admin_panel");
+}
+
+function adminUserKeyboard(telegramId: string) {
+  return new InlineKeyboard()
+    .text("Выдать Free", `admin_grant:${telegramId}:FREE`)
+    .row()
+    .text("Выдать Plus", `admin_grant:${telegramId}:PLUS`)
+    .text("Выдать Pro", `admin_grant:${telegramId}:PRO`)
+    .row()
+    .text("← Участники", "admin_users")
+    .text("← Админка", "admin_panel");
 }
 
 function cabinetKeyboard() {
@@ -1242,6 +1352,246 @@ function escapeHtml(value: string) {
     .replaceAll('"', "&quot;");
 }
 
+type TelegramFrom = {
+  id: number;
+  username?: string;
+  first_name?: string;
+  last_name?: string;
+};
+
+type AdminUserListItem = {
+  telegramId: string | null;
+  username: string | null;
+  displayName: string | null;
+  isAdmin: boolean;
+  createdAt: Date;
+  subscriptions: Array<{ plan: Plan; status: string; endsAt: Date | null; createdAt: Date }>;
+  payments: Array<{ amount: number; plan: Plan; status: string; createdAt: Date }>;
+};
+
+async function syncTelegramUser(from: TelegramFrom) {
+  const telegramId = String(from.id);
+  const displayName = [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || `tg:${telegramId}`;
+  const shouldBootstrapAdmin =
+    configuredAdminTelegramIds.size === 0 && (await prisma.user.count({ where: { isAdmin: true } })) === 0;
+  const shouldBeAdmin = configuredAdminTelegramIds.has(telegramId) || shouldBootstrapAdmin;
+
+  const user = await prisma.user.upsert({
+    where: { telegramId },
+    update: {
+      username: from.username,
+      displayName,
+      ...(shouldBeAdmin ? { isAdmin: true } : {})
+    },
+    create: {
+      telegramId,
+      username: from.username,
+      displayName,
+      isAdmin: shouldBeAdmin
+    }
+  });
+
+  const profile = getUserProfile(from.id);
+  profile.isAdmin = user.isAdmin;
+  profile.plan = user.isAdmin ? "PRO" : await getActivePlan(user.id);
+  return user;
+}
+
+async function isAdminUser(userId: number) {
+  if (configuredAdminTelegramIds.has(String(userId))) {
+    const profile = getUserProfile(userId);
+    profile.isAdmin = true;
+    profile.plan = "PRO";
+    return true;
+  }
+  const user = await prisma.user.findUnique({ where: { telegramId: String(userId) }, select: { isAdmin: true } });
+  if (!user?.isAdmin) return false;
+  const profile = getUserProfile(userId);
+  profile.isAdmin = true;
+  profile.plan = "PRO";
+  return true;
+}
+
+async function getActivePlan(userId: string): Promise<Plan> {
+  const subscription = await prisma.subscription.findFirst({
+    where: {
+      userId,
+      status: "ACTIVE",
+      OR: [{ endsAt: null }, { endsAt: { gt: new Date() } }]
+    },
+    orderBy: { createdAt: "desc" }
+  });
+  return subscription?.plan ?? "FREE";
+}
+
+async function recordSuccessfulPayment(telegramUserId: number, plan: Exclude<Plan, "FREE">, chargeId: string, payload: string) {
+  const user = await prisma.user.findUnique({ where: { telegramId: String(telegramUserId) } });
+  if (!user) return;
+  const existing = await prisma.payment.findFirst({ where: { providerPaymentId: chargeId } });
+  if (existing) return;
+  const endsAt = new Date();
+  endsAt.setMonth(endsAt.getMonth() + 1);
+  await prisma.payment.create({
+    data: {
+      userId: user.id,
+      provider: "TELEGRAM_STARS",
+      providerPaymentId: chargeId,
+      plan,
+      amount: getPlanPriceStars(plan),
+      currency: "XTR",
+      status: "PAID",
+      payload: { payload }
+    }
+  });
+  await prisma.subscription.create({
+    data: {
+      userId: user.id,
+      plan,
+      status: "ACTIVE",
+      startsAt: new Date(),
+      endsAt
+    }
+  });
+}
+
+async function grantPlanByTelegramId(telegramId: string, plan: Plan) {
+  const user = await prisma.user.upsert({
+    where: { telegramId },
+    update: {},
+    create: { telegramId, displayName: `tg:${telegramId}` }
+  });
+  await prisma.subscription.updateMany({
+    where: { userId: user.id, status: "ACTIVE" },
+    data: { status: "CANCELED", endsAt: new Date() }
+  });
+  if (plan !== "FREE") {
+    await prisma.subscription.create({
+      data: { userId: user.id, plan, status: "ACTIVE", startsAt: new Date(), endsAt: null }
+    });
+  }
+  const numericId = Number(telegramId);
+  if (Number.isFinite(numericId)) getUserProfile(numericId).plan = plan;
+}
+
+async function setAdminByTelegramId(telegramId: string) {
+  await prisma.user.upsert({
+    where: { telegramId },
+    update: { isAdmin: true },
+    create: { telegramId, displayName: `tg:${telegramId}`, isAdmin: true }
+  });
+  const numericId = Number(telegramId);
+  if (Number.isFinite(numericId)) {
+    const profile = getUserProfile(numericId);
+    profile.isAdmin = true;
+    profile.plan = "PRO";
+  }
+}
+
+async function listAdminUsers(): Promise<AdminUserListItem[]> {
+  return prisma.user.findMany({
+    orderBy: { createdAt: "desc" },
+    take: 10,
+    include: {
+      subscriptions: { orderBy: { createdAt: "desc" }, take: 1 },
+      payments: { orderBy: { createdAt: "desc" }, take: 1 }
+    }
+  });
+}
+
+function adminUserLabel(user: { telegramId: string | null; username: string | null; displayName: string | null }) {
+  const name = user.username ? `@${user.username}` : user.displayName || "Без имени";
+  return `${name} · ${user.telegramId ?? "no id"}`.slice(0, 60);
+}
+
+async function adminPanelText() {
+  const [users, admins, paidPayments] = await Promise.all([
+    prisma.user.count(),
+    prisma.user.count({ where: { isAdmin: true } }),
+    prisma.payment.count({ where: { status: "PAID" } })
+  ]);
+  return [
+    "<b>Админка Rolka</b>",
+    "",
+    `Участников: <b>${users}</b>`,
+    `Админов: <b>${admins}</b>`,
+    `Купленных подписок: <b>${paidPayments}</b>`,
+    "",
+    "Выбери действие кнопками ниже."
+  ].join("\n");
+}
+
+async function adminStatsText() {
+  const [paid, plus, pro, activeSubscriptions] = await Promise.all([
+    prisma.payment.aggregate({ where: { status: "PAID" }, _count: { _all: true }, _sum: { amount: true } }),
+    prisma.payment.count({ where: { status: "PAID", plan: "PLUS" } }),
+    prisma.payment.count({ where: { status: "PAID", plan: "PRO" } }),
+    prisma.subscription.count({ where: { status: "ACTIVE", OR: [{ endsAt: null }, { endsAt: { gt: new Date() } }] } })
+  ]);
+  return [
+    "<b>Продажи и доступы</b>",
+    "",
+    `Купленных подписок: <b>${paid._count._all}</b>`,
+    `Plus покупок: <b>${plus}</b>`,
+    `Pro покупок: <b>${pro}</b>`,
+    `Сумма Stars: <b>${paid._sum.amount ?? 0}</b>`,
+    `Активных доступов всего: <b>${activeSubscriptions}</b>`,
+    "",
+    "Админские выдачи считаются активными доступами, но не покупками."
+  ].join("\n");
+}
+
+async function adminUsersText(users: AdminUserListItem[]) {
+  const total = await prisma.user.count();
+  const lines = users.map((user, index) => {
+    const plan = user.isAdmin ? "ADMIN/PRO" : user.subscriptions[0]?.plan ?? "FREE";
+    const paid = user.payments[0] ? `${user.payments[0].plan} ${user.payments[0].amount} Stars` : "нет покупок";
+    return `${index + 1}. ${escapeHtml(adminUserLabel(user))}\n   План: <b>${plan}</b>, покупка: ${paid}`;
+  });
+  return ["<b>Участники</b>", "", `Всего: <b>${total}</b>`, "", ...lines].join("\n");
+}
+
+async function adminUserText(telegramId: string) {
+  const user = await prisma.user.findUnique({
+    where: { telegramId },
+    include: {
+      subscriptions: { orderBy: { createdAt: "desc" }, take: 3 },
+      payments: { orderBy: { createdAt: "desc" }, take: 3 },
+      _count: { select: { characters: true, chats: true, messages: true } }
+    }
+  });
+  if (!user) return `Участник <code>${escapeHtml(telegramId)}</code> не найден. Можно выдать доступ, и он будет создан.`;
+  const activePlan = user.isAdmin ? "ADMIN/PRO" : await getActivePlan(user.id);
+  const payments = user.payments.length
+    ? user.payments.map((payment) => `${payment.plan}: ${payment.amount} Stars`).join("\n")
+    : "нет";
+  return [
+    "<b>Карточка участника</b>",
+    "",
+    `ID: <code>${escapeHtml(telegramId)}</code>`,
+    `Имя: <b>${escapeHtml(user.displayName ?? "Без имени")}</b>`,
+    `Username: ${user.username ? `@${escapeHtml(user.username)}` : "нет"}`,
+    `Админ: <b>${user.isAdmin ? "да" : "нет"}</b>`,
+    `Текущий доступ: <b>${activePlan}</b>`,
+    "",
+    `Персонажей: <b>${user._count.characters}</b>`,
+    `Чатов: <b>${user._count.chats}</b>`,
+    `Сообщений: <b>${user._count.messages}</b>`,
+    "",
+    "<b>Покупки:</b>",
+    payments
+  ].join("\n");
+}
+
+function adminAddAdminText() {
+  return [
+    "<b>Добавить админа</b>",
+    "",
+    "Отправь следующим сообщением числовой Telegram ID пользователя.",
+    "",
+    "Админ получает доступ к /admin и все платные возможности как Pro."
+  ].join("\n");
+}
+
 function getChatState(userId: number): ChatDraft {
   const existing = chatStates.get(userId);
   if (existing) return existing;
@@ -1268,6 +1618,18 @@ async function saveAwaitingInput(
   reply: (text: string, keyboard: InlineKeyboard) => Promise<void>
 ) {
   const state = getChatState(userId);
+  if (state.awaiting === "adminAddAdmin") {
+    state.awaiting = null;
+    if (!(await isAdminUser(userId))) return;
+    const telegramId = content.trim().replace(/^@/, "");
+    if (!/^\d{4,20}$/.test(telegramId)) {
+      await reply("Нужен числовой Telegram ID. Например: <code>123456789</code>", adminPanelKeyboard());
+      return;
+    }
+    await setAdminByTelegramId(telegramId);
+    await reply(`Админ добавлен: <code>${escapeHtml(telegramId)}</code>`, adminPanelKeyboard());
+    return;
+  }
   if (state.awaiting === "context") {
     state.context = content;
     state.awaiting = null;
@@ -1302,8 +1664,10 @@ async function saveAwaitingInput(
 function getUserProfile(userId: number): UserRuntimeProfile {
   const existing = userProfiles.get(userId);
   if (existing) return existing;
+  const isAdmin = configuredAdminTelegramIds.has(String(userId));
   const profile: UserRuntimeProfile = {
-    plan: "FREE",
+    plan: isAdmin ? "PRO" : "FREE",
+    isAdmin,
     characters: [],
     chatsStarted: 0,
     adultMessages: 0

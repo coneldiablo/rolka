@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
+    "dev:docker": "next dev --hostname 0.0.0.0",
+    "bot:polling": "tsx src/bot/polling.ts",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
@@ -12,7 +14,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev"
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:push": "prisma db push"
   },
   "dependencies": {
     "@google/genai": "^1.34.0",

@@ -1,5 +1,6 @@
 import { assertCanSendAdultMessage } from "@/domain/plans";
-import { buildPrompt, type PromptMessage } from "@/domain/prompts";
+import { buildPrompt, type PromptCharacter, type PromptMessage } from "@/domain/prompts";
+import type { RpMode } from "@/domain/modes";
 import { generateWithFallback, createConfiguredTextProviders } from "@/domain/providers";
 import { validateSafetyText } from "@/domain/safety";
 import { prisma } from "@/lib/prisma";
@@ -9,6 +10,17 @@ import { sendMessageSchema } from "@/server/schemas";
 
 export const runtime = "nodejs";
 
+type ChatForMessage = {
+  id: string;
+  mode: RpMode;
+  adultMessageCount: number;
+  lorebook: string | null;
+  memorySummary: string | null;
+  importedContext: string | null;
+  characters: Array<{ character: PromptCharacter }>;
+  messages: Array<{ role: "USER" | "ASSISTANT" | "SYSTEM"; content: string }>;
+};
+
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params;
@@ -17,7 +29,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const safety = validateSafetyText(input.content);
     if (!safety.ok) return jsonError(safety.code, safety.reason, 422);
 
-    const chat = await prisma.chat.findFirst({
+    const chat: ChatForMessage | null = await prisma.chat.findFirst({
       where: { id, userId: user.id, status: "ACTIVE" },
       include: {
         characters: { include: { character: true } },
@@ -37,7 +49,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const recentMessages: PromptMessage[] = [...chat.messages]
       .reverse()
-      .map((message) => ({
+      .map((message): PromptMessage => ({
         role: message.role === "ASSISTANT" ? "assistant" : message.role === "SYSTEM" ? "system" : "user",
         content: message.content
       }));
