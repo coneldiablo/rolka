@@ -8,6 +8,7 @@ export type TextGenerationRequest = {
   messages: PromptMessage[];
   model?: string;
   temperature?: number;
+  maxTokens?: number;
 };
 
 export type TextGenerationResponse = {
@@ -62,14 +63,23 @@ export class OpenAiCompatibleTextProvider implements TextProvider {
 
   async generateText(request: TextGenerationRequest): Promise<TextGenerationResponse> {
     const model = request.model ?? this.defaultModel;
+    const maxTokens = request.maxTokens ?? readOptionalMaxTokens();
     const completion = await this.client.chat.completions.create({
       model,
       messages: request.messages,
-      temperature: request.temperature ?? 0.85
+      temperature: request.temperature ?? 0.85,
+      ...(maxTokens ? { max_tokens: maxTokens } : {})
     });
     const content = completion.choices[0]?.message?.content?.trim() ?? "";
     return { content, provider: this.name, model };
   }
+}
+
+function readOptionalMaxTokens() {
+  const raw = process.env.AI_TEXT_MAX_TOKENS;
+  if (!raw) return undefined;
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 export function createConfiguredTextProviders(): TextProvider[] {
@@ -139,7 +149,8 @@ export async function generateWithFallback(
             ...request.messages,
             {
               role: "user",
-              content: "Rewrite the previous answer in-scene. Remove AI disclaimers and generic assistant wording."
+              content:
+                "Перепиши предыдущий ответ внутри сцены. Убери ИИ-дисклеймеры, шаблонность и общий ассистентский тон. Сделай ответ короче, живее и удобнее для продолжения RP."
             }
           ]
         });

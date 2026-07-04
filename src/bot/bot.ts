@@ -1,15 +1,29 @@
 import { Bot, InlineKeyboard } from "grammy";
-import { getPlanPriceStars } from "@/domain/plans";
+import { getPlanPriceStars, PLAN_LIMITS, type Plan } from "@/domain/plans";
 import { buildPrompt, type PromptCharacter, type PromptMessage } from "@/domain/prompts";
 import { createConfiguredTextProviders, generateWithFallback } from "@/domain/providers";
-import { validateSafetyText } from "@/domain/safety";
+import { validateAdultCharacters, validateSafetyText } from "@/domain/safety";
 import type { RpMode } from "@/domain/modes";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 
 const appUrl = process.env.TELEGRAM_MINI_APP_URL ?? process.env.APP_URL;
 
-type AwaitingInput = "context" | "userProfile" | "aiCharacter" | null;
+type AwaitingInput = "context" | "userProfile" | "aiCharacter" | "savedCharacter" | null;
+
+type SavedCharacter = PromptCharacter & {
+  id: string;
+};
+
+type UserRuntimeProfile = {
+  plan: Plan;
+  ageVerifiedAt?: Date;
+  termsAcceptedAt?: Date;
+  privacyAcceptedAt?: Date;
+  characters: SavedCharacter[];
+  chatsStarted: number;
+  adultMessages: number;
+};
 
 type ChatDraft = {
   awaiting: AwaitingInput;
@@ -23,6 +37,7 @@ type ChatDraft = {
 };
 
 const chatStates = new Map<number, ChatDraft>();
+const userProfiles = new Map<number, UserRuntimeProfile>();
 
 const sampleUserProfiles: Record<string, string> = {
   Mira: "Мой персонаж: Мира, 24 года. Сдержанная, внимательная, говорит коротко, не любит давление, держит дистанцию, но быстро считывает настроение собеседника.",
@@ -70,7 +85,10 @@ export function createBot() {
   });
 
   bot.command("start", async (ctx) => {
-    if (ctx.from?.id) resetChatState(ctx.from.id);
+    if (ctx.from?.id) {
+      getUserProfile(ctx.from.id);
+      resetChatState(ctx.from.id);
+    }
     await ctx.reply(startText(ctx.from?.first_name), {
       parse_mode: "HTML",
       reply_markup: mainMenuKeyboard()
@@ -119,7 +137,9 @@ export function createBot() {
 
   bot.callbackQuery("new_chat", async (ctx) => {
     await ctx.answerCallbackQuery();
+    const previousMode = getChatState(ctx.from.id).mode;
     resetChatState(ctx.from.id);
+    if (previousMode) getChatState(ctx.from.id).mode = previousMode;
     await ctx.editMessageText(newChatText(), {
       parse_mode: "HTML",
       reply_markup: chatContextKeyboard()
@@ -137,6 +157,7 @@ export function createBot() {
 
   bot.callbackQuery("chat_context_skip", async (ctx) => {
     await ctx.answerCallbackQuery();
+    getChatState(ctx.from.id).awaiting = null;
     await ctx.editMessageText(chatUserProfileText(getChatState(ctx.from.id)), {
       parse_mode: "HTML",
       reply_markup: chatUserProfileKeyboard()
@@ -145,6 +166,7 @@ export function createBot() {
 
   bot.callbackQuery("chat_user_profile", async (ctx) => {
     await ctx.answerCallbackQuery();
+    getChatState(ctx.from.id).awaiting = null;
     await ctx.editMessageText(chatUserProfileText(getChatState(ctx.from.id)), {
       parse_mode: "HTML",
       reply_markup: chatUserProfileKeyboard()
@@ -156,7 +178,7 @@ export function createBot() {
     getChatState(ctx.from.id).awaiting = "userProfile";
     await ctx.reply(userProfileTemplateText(), {
       parse_mode: "HTML",
-      reply_markup: chatAiCharacterKeyboard()
+      reply_markup: awaitingInputKeyboard("chat_user_profile")
     });
   });
 
@@ -164,7 +186,7 @@ export function createBot() {
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(savedUserProfilesText(), {
       parse_mode: "HTML",
-      reply_markup: savedUserProfilesKeyboard()
+      reply_markup: savedUserProfilesKeyboard(ctx.from.id)
     });
   });
 
@@ -172,10 +194,11 @@ export function createBot() {
     await ctx.answerCallbackQuery("Твоя роль выбрана");
     const name = ctx.callbackQuery.data.replace("chat_user_profile_pick:", "");
     const state = getChatState(ctx.from.id);
-    state.userProfileName = name;
-    state.userProfile = sampleUserProfiles[name] ?? `Мой персонаж: ${name}`;
+    const character = findSavedCharacter(ctx.from.id, name);
+    state.userProfileName = character?.name ?? name;
+    state.userProfile = character ? renderUserProfileFromCharacter(character) : sampleUserProfiles[name] ?? `Мой персонаж: ${name}`;
     state.awaiting = null;
-    await ctx.editMessageText(userProfilePickedText(name), {
+    await ctx.editMessageText(userProfilePickedText(state.userProfileName), {
       parse_mode: "HTML",
       reply_markup: chatAiCharacterKeyboard()
     });
@@ -183,6 +206,7 @@ export function createBot() {
 
   bot.callbackQuery("chat_user_profile_skip", async (ctx) => {
     await ctx.answerCallbackQuery();
+    getChatState(ctx.from.id).awaiting = null;
     await ctx.editMessageText(chatAiCharacterText(), {
       parse_mode: "HTML",
       reply_markup: chatAiCharacterKeyboard()
@@ -191,6 +215,7 @@ export function createBot() {
 
   bot.callbackQuery("chat_ai_character", async (ctx) => {
     await ctx.answerCallbackQuery();
+    getChatState(ctx.from.id).awaiting = null;
     await ctx.editMessageText(chatAiCharacterText(), {
       parse_mode: "HTML",
       reply_markup: chatAiCharacterKeyboard()
@@ -201,7 +226,7 @@ export function createBot() {
     await ctx.answerCallbackQuery();
     await ctx.editMessageText(savedCharactersText(), {
       parse_mode: "HTML",
-      reply_markup: savedCharactersKeyboard()
+      reply_markup: savedCharactersKeyboard(ctx.from.id)
     });
   });
 
@@ -210,7 +235,24 @@ export function createBot() {
     getChatState(ctx.from.id).awaiting = "aiCharacter";
     await ctx.reply(aiCharacterTemplateText(), {
       parse_mode: "HTML",
-      reply_markup: chatModeStepKeyboard()
+      reply_markup: awaitingInputKeyboard("chat_ai_character")
+    });
+  });
+
+  bot.callbackQuery("character_create", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const profile = getUserProfile(ctx.from.id);
+    if (profile.plan === "FREE" && profile.characters.length >= freeCharacterLimit()) {
+      await ctx.editMessageText(characterLimitText(profile), {
+        parse_mode: "HTML",
+        reply_markup: subscriptionKeyboard()
+      });
+      return;
+    }
+    getChatState(ctx.from.id).awaiting = "savedCharacter";
+    await ctx.reply(characterCreateText(), {
+      parse_mode: "HTML",
+      reply_markup: awaitingInputKeyboard("characters")
     });
   });
 
@@ -237,7 +279,7 @@ export function createBot() {
     await ctx.answerCallbackQuery("Персонаж AI выбран");
     const name = ctx.callbackQuery.data.replace("chat_ai_character_pick:", "");
     const state = getChatState(ctx.from.id);
-    state.aiCharacter = sampleAiCharacters[name] ?? generatedAiCharacter;
+    state.aiCharacter = findSavedCharacter(ctx.from.id, name) ?? sampleAiCharacters[name] ?? generatedAiCharacter;
     state.awaiting = null;
     await ctx.editMessageText(aiCharacterPickedText(state.aiCharacter.name), {
       parse_mode: "HTML",
@@ -247,6 +289,7 @@ export function createBot() {
 
   bot.callbackQuery("chat_mode_step", async (ctx) => {
     await ctx.answerCallbackQuery();
+    getChatState(ctx.from.id).awaiting = null;
     await ctx.editMessageText(chatModeStepText(), {
       parse_mode: "HTML",
       reply_markup: chatModeStepKeyboard()
@@ -258,6 +301,7 @@ export function createBot() {
     const mode = ctx.callbackQuery.data.replace("chat_mode:", "");
     const state = getChatState(ctx.from.id);
     state.mode = mapMode(mode);
+    state.awaiting = null;
     await ctx.editMessageText(chatConfirmText(mode), {
       parse_mode: "HTML",
       reply_markup: chatConfirmKeyboard()
@@ -267,6 +311,16 @@ export function createBot() {
   bot.callbackQuery("chat_start_confirmed", async (ctx) => {
     await ctx.answerCallbackQuery();
     const state = getChatState(ctx.from.id);
+    const profile = getUserProfile(ctx.from.id);
+    const startCheck = canStartChat(profile, state);
+    if (!startCheck.ok) {
+      await ctx.editMessageText(startCheck.message, {
+        parse_mode: "HTML",
+        reply_markup: startCheck.keyboard
+      });
+      return;
+    }
+    profile.chatsStarted += 1;
     state.active = true;
     state.awaiting = null;
     state.mode ??= "CLASSIC";
@@ -289,7 +343,7 @@ export function createBot() {
     await ctx.answerCallbackQuery();
     await ctx.reply(characterTemplateText(), {
       parse_mode: "HTML",
-      reply_markup: backKeyboard()
+      reply_markup: charactersKeyboard()
     });
   });
 
@@ -321,9 +375,11 @@ export function createBot() {
   bot.callbackQuery(/^mode:/, async (ctx) => {
     await ctx.answerCallbackQuery("Режим выбран");
     const mode = ctx.callbackQuery.data.replace("mode:", "");
-    await ctx.reply(modeSelectedText(mode), {
+    const state = getChatState(ctx.from.id);
+    state.mode = mapMode(mode);
+    await ctx.reply(modeSelectedText(state.mode), {
       parse_mode: "HTML",
-      reply_markup: chatContextKeyboard()
+      reply_markup: modeSelectedKeyboard()
     });
   });
 
@@ -353,15 +409,19 @@ export function createBot() {
 
   bot.callbackQuery("adult_accept", async (ctx) => {
     await ctx.answerCallbackQuery("18+ подтверждено");
+    confirmAdult(getUserProfile(ctx.from.id));
     await ctx.reply(
-      "✅ <b>Возраст и согласие отмечены.</b>\n\nТеперь 18+ режим можно будет использовать после подключения базы и сохранения профиля. Запрещенные категории все равно блокируются safety-фильтром.",
+      "✅ <b>Возраст и согласие отмечены.</b>\n\n18+ режим доступен для взрослых вымышленных персонажей. Запрещенные категории все равно блокируются safety-фильтром.",
       { parse_mode: "HTML", reply_markup: mainMenuKeyboard() }
     );
   });
 
   bot.callbackQuery("adult_accept_chat", async (ctx) => {
     await ctx.answerCallbackQuery("18+ подтверждено");
-    getChatState(ctx.from.id).mode = "ADULT";
+    confirmAdult(getUserProfile(ctx.from.id));
+    const state = getChatState(ctx.from.id);
+    state.mode = "ADULT";
+    state.awaiting = null;
     await ctx.editMessageText(chatConfirmText("18+ Adult"), {
       parse_mode: "HTML",
       reply_markup: chatConfirmKeyboard()
@@ -419,7 +479,11 @@ export function createBot() {
   });
 
   bot.on("message:successful_payment", async (ctx) => {
-    await ctx.reply("✅ <b>Подписка активирована.</b>\n\nЛимиты обновятся в профиле после подключения платежного сохранения.", {
+    if (ctx.from?.id) {
+      const payload = ctx.message.successful_payment.invoice_payload;
+      getUserProfile(ctx.from.id).plan = payload.includes("PRO") ? "PRO" : "PLUS";
+    }
+    await ctx.reply("✅ <b>Подписка активирована.</b>\n\nЛимиты обновлены в текущей Telegram-сессии.", {
       parse_mode: "HTML",
       reply_markup: mainMenuKeyboard()
     });
@@ -474,6 +538,10 @@ function backKeyboard() {
   return new InlineKeyboard().text("← Главное меню", "main_menu");
 }
 
+function awaitingInputKeyboard(backCallback: string) {
+  return new InlineKeyboard().text("← Назад", backCallback).text("← Главное меню", "main_menu");
+}
+
 function chatContextKeyboard() {
   return new InlineKeyboard()
     .text("🧠 У меня есть старый контекст", "chat_context_have")
@@ -509,18 +577,36 @@ function chatAiCharacterKeyboard() {
     .text("← Назад к анкете", "chat_user_profile");
 }
 
-function savedCharactersKeyboard() {
-  return new InlineKeyboard()
+function savedCharactersKeyboard(userId?: number) {
+  const keyboard = new InlineKeyboard();
+  const saved = userId ? getUserProfile(userId).characters : [];
+  if (saved.length) {
+    saved.slice(0, 8).forEach((character, index) => {
+      keyboard.text(character.name, `chat_ai_character_pick:${character.id}`);
+      if (index % 2 === 1) keyboard.row();
+    });
+    keyboard.row();
+  }
+  return keyboard
     .text("Mira · пример", "chat_ai_character_pick:Mira")
     .text("Noah · пример", "chat_ai_character_pick:Noah")
     .row()
-    .text("➕ Создать персонажа", "chat_ai_character_custom")
+    .text("➕ Создать персонажа", "character_create")
     .row()
     .text("← Назад", "chat_ai_character");
 }
 
-function savedUserProfilesKeyboard() {
-  return new InlineKeyboard()
+function savedUserProfilesKeyboard(userId?: number) {
+  const keyboard = new InlineKeyboard();
+  const saved = userId ? getUserProfile(userId).characters : [];
+  if (saved.length) {
+    saved.slice(0, 8).forEach((character, index) => {
+      keyboard.text(character.name, `chat_user_profile_pick:${character.id}`);
+      if (index % 2 === 1) keyboard.row();
+    });
+    keyboard.row();
+  }
+  return keyboard
     .text("Mira · пример", "chat_user_profile_pick:Mira")
     .text("Noah · пример", "chat_user_profile_pick:Noah")
     .row()
@@ -573,10 +659,20 @@ function chatReadyKeyboard() {
 
 function charactersKeyboard() {
   return new InlineKeyboard()
-    .text("➕ Шаблон анкеты", "character_template")
+    .text("➕ Создать персонажа", "character_create")
+    .text("📋 Шаблон", "character_template")
+    .row()
     .text("🎭 Использовать в чате", "chat_ai_character_saved")
     .row()
     .text("⭐ Снять лимит", "subscription")
+    .text("← Главное меню", "main_menu");
+}
+
+function modeSelectedKeyboard() {
+  return new InlineKeyboard()
+    .text("🎭 Создать чат с этим режимом", "new_chat")
+    .row()
+    .text("⚙️ Другой режим", "rp_modes")
     .text("← Главное меню", "main_menu");
 }
 
@@ -902,7 +998,27 @@ function charactersText() {
     "<b>Free:</b> можно создать 3 персонажа.",
     "<b>Plus/Pro:</b> безлимит персонажей.",
     "",
-    "Пока БД не подключена, можешь нажать «Шаблон анкеты» и заполнить ее вручную."
+    "Нажми «Создать персонажа», отправь анкету одним сообщением, и бот сохранит ее в кнопки текущей сессии."
+  ].join("\n");
+}
+
+function characterCreateText() {
+  return [
+    "➕ <b>Создание персонажа</b>",
+    "",
+    "Отправь анкету одним сообщением. Чем подробнее, тем лучше AI удержит образ.",
+    "",
+    "<b>Формат:</b>",
+    "<code>Имя:",
+    "Возраст:",
+    "Внешность:",
+    "Характер:",
+    "Стиль речи:",
+    "Сеттинг/тема:",
+    "Границы/запреты:",
+    "Стартовая сцена:</code>",
+    "",
+    "<b>Важно:</b> для 18+ режима возраст должен быть 18+."
   ].join("\n");
 }
 
@@ -920,7 +1036,17 @@ function characterTemplateText() {
     "<b>Границы/запреты:</b>",
     "<b>Стартовая сцена:</b>",
     "",
-    "Позже эта форма будет сохраняться в личном кабинете и открываться одной кнопкой."
+    "Чтобы сохранить персонажа, нажми «Создать персонажа» и отправь заполненную анкету."
+  ].join("\n");
+}
+
+function characterLimitText(profile: UserRuntimeProfile) {
+  return [
+    "⭐ <b>Лимит персонажей Free исчерпан.</b>",
+    "",
+    `Сейчас сохранено: <b>${profile.characters.length}/3</b>.`,
+    "",
+    "В Free можно создать 3 персонажа. Plus/Pro открывает безлимит."
   ].join("\n");
 }
 
@@ -986,8 +1112,8 @@ function modesText() {
   ].join("\n");
 }
 
-function modeSelectedText(mode: string) {
-  return `✅ <b>Режим выбран:</b> ${escapeHtml(mode)}\n\nТеперь можно создать чат, выбрать персонажа и начать сцену.`;
+function modeSelectedText(mode: RpMode) {
+  return `✅ <b>Режим выбран:</b> ${escapeHtml(mode)}\n\nТеперь можно создать чат: выбранный режим сохранится в черновик.`;
 }
 
 function imageText() {
@@ -1051,6 +1177,26 @@ function subscriptionText() {
     "• long memory",
     "• lorebook",
     "• больше генераций фото"
+  ].join("\n");
+}
+
+function chatLimitText(profile: UserRuntimeProfile) {
+  return [
+    "⭐ <b>Лимит чатов Free исчерпан.</b>",
+    "",
+    `Создано чатов в текущей сессии: <b>${profile.chatsStarted}/3</b>.`,
+    "",
+    "В Free доступно 3 чата, удаление не помогает обходить лимит. Для новых чатов нужен Plus или Pro."
+  ].join("\n");
+}
+
+function adultLimitText(profile: UserRuntimeProfile) {
+  return [
+    "⭐ <b>Лимит 18+ сообщений Free закончился.</b>",
+    "",
+    `Использовано: <b>${profile.adultMessages}/15</b>.`,
+    "",
+    "Чтобы продолжить 18+ RP без ограничения, подключи Plus или Pro."
   ].join("\n");
 }
 
@@ -1139,7 +1285,60 @@ async function saveAwaitingInput(
     state.aiCharacter = parseManualAiCharacter(content);
     state.awaiting = null;
     await reply("✅ <b>Персонаж AI сохранен.</b>\n\nТеперь выбери режим RP.", chatModeStepKeyboard());
+    return;
   }
+  if (state.awaiting === "savedCharacter") {
+    const profile = getUserProfile(userId);
+    const character = { ...parseManualAiCharacter(content), id: createRuntimeId() };
+    profile.characters.push(character);
+    state.awaiting = null;
+    await reply(
+      `✅ <b>Персонаж сохранен:</b> ${escapeHtml(character.name)}\n\nТеперь его можно выбрать как твою роль или как персонажа для AI при создании чата.`,
+      charactersKeyboard()
+    );
+  }
+}
+
+function getUserProfile(userId: number): UserRuntimeProfile {
+  const existing = userProfiles.get(userId);
+  if (existing) return existing;
+  const profile: UserRuntimeProfile = {
+    plan: "FREE",
+    characters: [],
+    chatsStarted: 0,
+    adultMessages: 0
+  };
+  userProfiles.set(userId, profile);
+  return profile;
+}
+
+function confirmAdult(profile: UserRuntimeProfile) {
+  const now = new Date();
+  profile.ageVerifiedAt = now;
+  profile.termsAcceptedAt = now;
+  profile.privacyAcceptedAt = now;
+}
+
+function canStartChat(profile: UserRuntimeProfile, state: ChatDraft): { ok: true } | { ok: false; message: string; keyboard: InlineKeyboard } {
+  if (profile.plan === "FREE" && profile.chatsStarted >= freeChatLimit()) {
+    return { ok: false, message: chatLimitText(profile), keyboard: subscriptionKeyboard() };
+  }
+
+  if (state.mode === "ADULT") {
+    if (!profile.ageVerifiedAt || !profile.termsAcceptedAt || !profile.privacyAcceptedAt) {
+      return { ok: false, message: adultChatText(), keyboard: adultChatKeyboard() };
+    }
+    const adultSafety = validateAdultCharacters("ADULT", [state.aiCharacter ?? generatedAiCharacter]);
+    if (!adultSafety.ok) {
+      return {
+        ok: false,
+        message: `🔞 <b>18+ чат нельзя начать.</b>\n\n${escapeHtml(adultSafety.reason)}\n\nВыбери персонажа 18+ или поправь анкету.`,
+        keyboard: chatAiCharacterKeyboard()
+      };
+    }
+  }
+
+  return { ok: true };
 }
 
 async function handleActiveChatMessage(
@@ -1150,9 +1349,14 @@ async function handleActiveChatMessage(
   reply: (text: string, keyboard?: InlineKeyboard) => Promise<void>
 ) {
   const state = getChatState(userId);
+  const profile = getUserProfile(userId);
   const safety = validateSafetyText(content);
   if (!safety.ok) {
     await reply(`Сообщение заблокировано safety-фильтром: ${safety.reason}`, chatReadyKeyboard());
+    return;
+  }
+  if (state.mode === "ADULT" && profile.plan === "FREE" && profile.adultMessages >= freeAdultMessageLimit()) {
+    await reply(adultLimitText(profile), subscriptionKeyboard());
     return;
   }
 
@@ -1168,10 +1372,11 @@ async function handleActiveChatMessage(
     });
     const response = await generateWithFallback(createConfiguredTextProviders(), {
       messages: prompt,
-      temperature: 0.85
+      temperature: 0.82
     });
-    const answer = response.content || "Пустой ответ от модели. Попробуй отправить сообщение еще раз.";
+    const answer = clampTelegramText(response.content || "Пустой ответ от модели. Попробуй отправить сообщение еще раз.");
     state.messages.push({ role: "assistant", content: answer });
+    if (state.mode === "ADULT") profile.adultMessages += 1;
     await reply(answer, chatReadyKeyboard());
   } catch (error) {
     console.error("AI chat failed", { chatId, error });
@@ -1202,6 +1407,47 @@ function parseManualAiCharacter(content: string): PromptCharacter {
     speechStyle: "Живой естественный стиль без пафоса, прямые реплики, умеренная длина.",
     boundaries: "Не отыгрывать действия пользователя, не использовать запрещенные клише, не быть possessive без согласования."
   };
+}
+
+function freeCharacterLimit() {
+  return typeof PLAN_LIMITS.FREE.characters === "number" ? PLAN_LIMITS.FREE.characters : Number.POSITIVE_INFINITY;
+}
+
+function freeChatLimit() {
+  return typeof PLAN_LIMITS.FREE.chats === "number" ? PLAN_LIMITS.FREE.chats : Number.POSITIVE_INFINITY;
+}
+
+function freeAdultMessageLimit() {
+  return typeof PLAN_LIMITS.FREE.adultMessages === "number" ? PLAN_LIMITS.FREE.adultMessages : Number.POSITIVE_INFINITY;
+}
+
+function findSavedCharacter(userId: number, idOrName: string): SavedCharacter | undefined {
+  return getUserProfile(userId).characters.find((character) => character.id === idOrName || character.name === idOrName);
+}
+
+function renderUserProfileFromCharacter(character: PromptCharacter) {
+  return [
+    `Мой персонаж: ${character.name}`,
+    `Возраст: ${character.age}`,
+    `Описание: ${character.description}`,
+    character.appearance ? `Внешность: ${character.appearance}` : null,
+    character.personality ? `Характер: ${character.personality}` : null,
+    character.speechStyle ? `Стиль речи: ${character.speechStyle}` : null,
+    character.boundaries ? `Границы/запреты: ${character.boundaries}` : null
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function createRuntimeId() {
+  return `local_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function clampTelegramText(value: string) {
+  const limit = 3800;
+  const normalized = value.trim();
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, limit).trim()}\n\n[Ответ обрезан: модель написала слишком длинный пост.]`;
 }
 
 function mapMode(mode: string): RpMode {
