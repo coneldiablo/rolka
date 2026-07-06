@@ -62,7 +62,7 @@ docker compose down
 docker compose down -v
 ```
 
-`npm run db:backup` writes a PostgreSQL custom-format dump to `backups/`. Keep these dumps outside the project folder if you need protection from accidental volume deletion or machine failure.
+`npm run db:backup` runs `scripts/db-backup.sh` and writes a PostgreSQL custom-format dump to `backups/`. Keep these dumps outside the project folder if you need protection from accidental volume deletion or machine failure.
 
 ## Telegram
 
