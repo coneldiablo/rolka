@@ -103,6 +103,7 @@ model Subscription {
   user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, status])
+  @@index([status, endsAt])
 }
 
 model Payment {
@@ -120,6 +121,7 @@ model Payment {
   user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, status])
+  @@index([providerPaymentId])
 }
 
 model Character {
@@ -141,6 +143,7 @@ model Character {
   chatLinks    ChatCharacter[]
 
   @@index([userId, createdAt])
+  @@index([userId, name])
 }
 
 model Chat {
@@ -162,6 +165,7 @@ model Chat {
   images           ImageGeneration[]
 
   @@index([userId, status])
+  @@index([userId, status, updatedAt])
 }
 
 model ChatCharacter {
@@ -255,4 +259,5 @@ model ImageGeneration {
   chat      Chat?       @relation(fields: [chatId], references: [id], onDelete: SetNull)
 
   @@index([userId, createdAt])
+  @@index([userId, status, createdAt])
 }

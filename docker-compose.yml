@@ -4,6 +4,7 @@ services:
       context: .
       target: dev
     command: sh -c "npx prisma generate && npx prisma db push && npm run dev:docker"
+    restart: unless-stopped
     env_file:
       - .env
     environment:
@@ -28,6 +29,7 @@ services:
       context: .
       target: dev
     command: npm run bot:polling
+    restart: unless-stopped
     env_file:
       - .env
     environment:
@@ -44,10 +46,25 @@ services:
 
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
+    stop_grace_period: 60s
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - checkpoint_timeout=10min
+      - -c
+      - max_wal_size=1GB
+      - -c
+      - wal_compression=on
     environment:
       POSTGRES_DB: rolka
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
+      POSTGRES_INITDB_ARGS: "--data-checksums"
     ports:
       - "5432:5432"
     volumes:
@@ -60,6 +77,8 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
     ports:
       - "6379:6379"
     volumes:

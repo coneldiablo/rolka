@@ -57,9 +57,12 @@ Useful commands:
 ```bash
 docker compose logs -f app
 docker compose logs -f bot
+npm run db:backup
 docker compose down
 docker compose down -v
 ```
+
+`npm run db:backup` writes a PostgreSQL custom-format dump to `backups/`. Keep these dumps outside the project folder if you need protection from accidental volume deletion or machine failure.
 
 ## Telegram
 

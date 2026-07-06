@@ -422,6 +422,7 @@ export function createBot() {
 
   bot.callbackQuery("chat_user_profile_saved", async (ctx) => {
     await ctx.answerCallbackQuery();
+    await syncTelegramUser(ctx.from);
     await ctx.editMessageText(savedUserProfilesText(), {
       parse_mode: "HTML",
       reply_markup: savedUserProfilesKeyboard(ctx.from.id)
@@ -463,6 +464,7 @@ export function createBot() {
 
   bot.callbackQuery("chat_ai_character_saved", async (ctx) => {
     await ctx.answerCallbackQuery();
+    await syncTelegramUser(ctx.from);
     await ctx.editMessageText(savedCharactersText(getChatState(ctx.from.id)), {
       parse_mode: "HTML",
       reply_markup: savedCharactersKeyboard(ctx.from.id)
@@ -650,6 +652,7 @@ export function createBot() {
 
   bot.callbackQuery("characters", async (ctx) => {
     await ctx.answerCallbackQuery();
+    await syncTelegramUser(ctx.from);
     getChatState(ctx.from.id).awaiting = null;
     await ctx.editMessageText(charactersText(), {
       parse_mode: "HTML",
@@ -667,6 +670,7 @@ export function createBot() {
 
   bot.callbackQuery("my_chats", async (ctx) => {
     await ctx.answerCallbackQuery();
+    await syncTelegramUser(ctx.from);
     getChatState(ctx.from.id).awaiting = null;
     await ctx.editMessageText(chatsText(getUserProfile(ctx.from.id)), {
       parse_mode: "HTML",
@@ -676,6 +680,7 @@ export function createBot() {
 
   bot.callbackQuery("delete_chat_menu", async (ctx) => {
     await ctx.answerCallbackQuery();
+    await syncTelegramUser(ctx.from);
     await ctx.editMessageText(deleteChatText(getUserProfile(ctx.from.id)), {
       parse_mode: "HTML",
       reply_markup: deleteChatKeyboard(ctx.from.id)
@@ -686,6 +691,7 @@ export function createBot() {
     await ctx.answerCallbackQuery("Чат удален");
     const id = ctx.callbackQuery.data.replace("delete_chat:", "");
     const profile = getUserProfile(ctx.from.id);
+    await deletePersistedChat(ctx.from.id, id);
     profile.savedChats = profile.savedChats.filter((chat) => chat.id !== id);
     await ctx.editMessageText(chatsText(profile), {
       parse_mode: "HTML",
@@ -735,6 +741,7 @@ export function createBot() {
     await ctx.answerCallbackQuery("Чат удален");
     const id = ctx.callbackQuery.data.replace("delete_saved_chat:", "");
     const profile = getUserProfile(ctx.from.id);
+    await deletePersistedChat(ctx.from.id, id);
     profile.savedChats = profile.savedChats.filter((chat) => chat.id !== id);
     await ctx.editMessageText(chatsText(profile), {
       parse_mode: "HTML",
@@ -793,7 +800,7 @@ export function createBot() {
   bot.callbackQuery("confirm_save_and_exit", async (ctx) => {
     await ctx.answerCallbackQuery("Чат сохранен");
     const state = getChatState(ctx.from.id);
-    const saved = saveCurrentChat(ctx.from.id, state);
+    const saved = await saveCurrentChat(ctx.from.id, state);
     state.active = false;
     state.awaiting = null;
     state.messages = [];
@@ -2347,6 +2354,7 @@ async function syncTelegramUser(from: TelegramFrom) {
   profile.plan = user.isAdmin ? "PRO" : await getActivePlan(user.id);
   profile.onboardingCompleted = user.onboardingCompleted;
   profile.onboardingMessagesShown = Boolean(user.valueCheckpointShownAt);
+  await loadPersistedProfileData(user.id, profile);
   return user;
 }
 
@@ -2389,6 +2397,68 @@ async function markValueCheckpointShown(telegramUserId: number) {
   await prisma.user.updateMany({
     where: { telegramId: String(telegramUserId), valueCheckpointShownAt: null },
     data: { valueCheckpointShownAt: new Date() }
+  });
+}
+
+async function loadPersistedProfileData(userId: string, profile: UserRuntimeProfile) {
+  const [characters, chats] = await Promise.all([
+    prisma.character.findMany({
+      where: { userId },
+      orderBy: { createdAt: "asc" }
+    }),
+    prisma.chat.findMany({
+      where: { userId, status: { not: "DELETED" } },
+      orderBy: { updatedAt: "desc" },
+      take: 20,
+      include: {
+        messages: { orderBy: { createdAt: "desc" }, take: 80 },
+        characters: { include: { character: true } }
+      }
+    })
+  ]);
+
+  profile.characters = characters.map((character) => ({
+    id: character.id,
+    name: character.name,
+    age: character.age,
+    description: character.description,
+    appearance: character.appearance,
+    personality: character.personality,
+    speechStyle: character.speechStyle,
+    setting: character.setting,
+    boundaries: character.boundaries,
+    starterScene: character.starterScene
+  }));
+
+  profile.savedChats = chats.map((chat) => {
+    const aiCharacter = chat.characters[0]?.character;
+    return {
+      id: chat.id,
+      title: chat.title,
+      mode: chat.mode as RpMode,
+      aiCharacter: aiCharacter
+        ? {
+            name: aiCharacter.name,
+            age: aiCharacter.age,
+            description: aiCharacter.description,
+            appearance: aiCharacter.appearance,
+            personality: aiCharacter.personality,
+            speechStyle: aiCharacter.speechStyle,
+            setting: aiCharacter.setting,
+            boundaries: aiCharacter.boundaries,
+            starterScene: aiCharacter.starterScene
+          }
+        : undefined,
+      aiCharacterName: aiCharacter?.name ?? "Персонаж AI",
+      savedAt: chat.updatedAt,
+      messages: [...chat.messages].reverse().map((message) => ({
+        role: message.role === "ASSISTANT" ? "assistant" : message.role === "SYSTEM" ? "system" : "user",
+        content: message.content
+      })),
+      context: chat.importedContext ?? undefined,
+      sceneBrief: chat.memorySummary ?? undefined,
+      userProfile: chat.lorebook ?? undefined
+    };
   });
 }
 
@@ -2625,7 +2695,7 @@ async function saveAwaitingInput(
   }
   if (state.awaiting === "libraryCharacter" || state.awaiting === "chatAiCharacter" || state.awaiting === "chatUserCharacter") {
     const profile = getUserProfile(userId);
-    const character = { ...parseManualAiCharacter(content), id: createRuntimeId() };
+    const character = await persistCharacterForTelegramUser(userId, parseManualAiCharacter(content));
     profile.characters.push(character);
     const target = state.awaiting;
     state.awaiting = null;
@@ -2678,15 +2748,43 @@ function getUserProfile(userId: number): UserRuntimeProfile {
   return profile;
 }
 
-function saveCurrentChat(userId: number, state: ChatDraft): SavedChat {
+async function saveCurrentChat(userId: number, state: ChatDraft): Promise<SavedChat> {
   const profile = getUserProfile(userId);
   const savedAt = new Date();
+  const aiCharacter = await persistCharacterForTelegramUser(userId, state.aiCharacter ?? generatedAiCharacter);
+  const user = await prisma.user.findUnique({ where: { telegramId: String(userId) } });
+  const title = buildSavedChatTitle(state, savedAt);
+  let persistedChatId = createRuntimeId();
+  if (user) {
+    const chat = await prisma.chat.create({
+      data: {
+        userId: user.id,
+        title,
+        mode: state.mode ?? "CLASSIC",
+        status: "ACTIVE",
+        importedContext: state.context,
+        memorySummary: state.sceneBrief,
+        lorebook: state.userProfile,
+        characters: {
+          create: [{ characterId: aiCharacter.id }]
+        },
+        messages: {
+          create: state.messages.map((message) => ({
+            userId: user.id,
+            role: message.role === "assistant" ? "ASSISTANT" : message.role === "system" ? "SYSTEM" : "USER",
+            content: message.content
+          }))
+        }
+      }
+    });
+    persistedChatId = chat.id;
+  }
   const saved: SavedChat = {
-    id: createRuntimeId(),
-    title: buildSavedChatTitle(state, savedAt),
+    id: persistedChatId,
+    title,
     mode: state.mode ?? "CLASSIC",
-    aiCharacter: state.aiCharacter ?? generatedAiCharacter,
-    aiCharacterName: state.aiCharacter?.name ?? generatedAiCharacter.name,
+    aiCharacter,
+    aiCharacterName: aiCharacter.name,
     savedAt,
     messages: [...state.messages],
     context: state.context,
@@ -2695,6 +2793,71 @@ function saveCurrentChat(userId: number, state: ChatDraft): SavedChat {
   };
   profile.savedChats.unshift(saved);
   return saved;
+}
+
+async function persistCharacterForTelegramUser(userId: number, character: PromptCharacter): Promise<SavedCharacter> {
+  const user = await prisma.user.findUnique({ where: { telegramId: String(userId) } });
+  if (!user) return { ...character, id: createRuntimeId() };
+
+  const existing = await prisma.character.findFirst({
+    where: {
+      userId: user.id,
+      name: character.name,
+      description: character.description
+    },
+    orderBy: { createdAt: "desc" }
+  });
+  if (existing) {
+    return {
+      id: existing.id,
+      name: existing.name,
+      age: existing.age,
+      description: existing.description,
+      appearance: existing.appearance,
+      personality: existing.personality,
+      speechStyle: existing.speechStyle,
+      setting: existing.setting,
+      boundaries: existing.boundaries,
+      starterScene: existing.starterScene
+    };
+  }
+
+  const created = await prisma.character.create({
+    data: {
+      userId: user.id,
+      name: character.name,
+      age: character.age,
+      description: character.description,
+      appearance: character.appearance,
+      personality: character.personality,
+      speechStyle: character.speechStyle,
+      setting: character.setting,
+      boundaries: character.boundaries,
+      starterScene: character.starterScene,
+      isAdultReady: character.age >= 18
+    }
+  });
+  return {
+    id: created.id,
+    name: created.name,
+    age: created.age,
+    description: created.description,
+    appearance: created.appearance,
+    personality: created.personality,
+    speechStyle: created.speechStyle,
+    setting: created.setting,
+    boundaries: created.boundaries,
+    starterScene: created.starterScene
+  };
+}
+
+async function deletePersistedChat(telegramUserId: number, chatId: string) {
+  const user = await prisma.user.findUnique({ where: { telegramId: String(telegramUserId) } });
+  if (!user) return;
+  await prisma.chat.updateMany({
+    where: { id: chatId, userId: user.id },
+    data: { status: "DELETED" }
+  });
 }
 
 function restoreSavedChat(userId: number, chat: SavedChat) {
