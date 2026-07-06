@@ -8,7 +8,6 @@ import { prisma } from "@/lib/prisma";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 
-const appUrl = process.env.TELEGRAM_MINI_APP_URL ?? process.env.APP_URL;
 const configuredAdminTelegramIds = new Set(
   (process.env.ADMIN_TELEGRAM_IDS ?? "")
     .split(",")
@@ -18,6 +17,7 @@ const configuredAdminTelegramIds = new Set(
 
 type AwaitingInput =
   | "context"
+  | "sceneBrief"
   | "userProfile"
   | "aiCharacter"
   | "libraryCharacter"
@@ -34,10 +34,12 @@ type SavedChat = {
   id: string;
   title: string;
   mode: RpMode;
+  aiCharacter?: PromptCharacter;
   aiCharacterName: string;
   savedAt: Date;
   messages: PromptMessage[];
   context?: string;
+  sceneBrief?: string;
   userProfile?: string;
 };
 
@@ -61,6 +63,7 @@ type UserRuntimeProfile = {
 type ChatDraft = {
   awaiting: AwaitingInput;
   context?: string;
+  sceneBrief?: string;
   userProfile?: string;
   userProfileName?: string;
   aiCharacter?: PromptCharacter;
@@ -73,8 +76,8 @@ const chatStates = new Map<number, ChatDraft>();
 const userProfiles = new Map<number, UserRuntimeProfile>();
 
 const sampleUserProfiles: Record<string, string> = {
-  Mira: "Мой персонаж: Мира, 24 года. Сдержанная, внимательная, говорит коротко, не любит давление, держит дистанцию, но быстро считывает настроение собеседника.",
-  Noah: "Мой персонаж: Ной, 31 год. Спокойный, ироничный, прямой в разговоре, не любит игры в молчанку, привык сначала наблюдать, потом действовать."
+  Mira: "Моя роль: Мира, 24 года. Сдержанная, внимательная, говорит коротко, не любит давление, держит дистанцию, но быстро считывает настроение собеседника.",
+  Noah: "Моя роль: Ной, 31 год. Спокойный, ироничный, прямой в разговоре, не любит игры в молчанку, привык сначала наблюдать, потом действовать."
 };
 
 const sampleAiCharacters: Record<string, PromptCharacter> = {
@@ -356,16 +359,28 @@ export function createBot() {
     if (previousMode) getChatState(ctx.from.id).mode = previousMode;
     await ctx.editMessageText(newChatText(), {
       parse_mode: "HTML",
-      reply_markup: newChatKeyboard()
+      reply_markup: newChatKeyboard(ctx.from.id)
     });
   });
 
   bot.callbackQuery("chat_context_step", async (ctx) => {
     await ctx.answerCallbackQuery();
     getChatState(ctx.from.id).awaiting = null;
-    await ctx.editMessageText(newChatText(), {
+    await ctx.editMessageText(chatUserProfileText(getChatState(ctx.from.id)), {
       parse_mode: "HTML",
-      reply_markup: newChatKeyboard()
+      reply_markup: chatUserProfileKeyboard()
+    });
+  });
+
+  bot.callbackQuery("continue_old_chat", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const previousMode = getChatState(ctx.from.id).mode;
+    resetChatState(ctx.from.id);
+    if (previousMode) getChatState(ctx.from.id).mode = previousMode;
+    getChatState(ctx.from.id).awaiting = "context";
+    await ctx.editMessageText(chatContextHaveText(), {
+      parse_mode: "HTML",
+      reply_markup: chatContextAwaitingKeyboard()
     });
   });
 
@@ -381,18 +396,18 @@ export function createBot() {
   bot.callbackQuery("chat_context_skip", async (ctx) => {
     await ctx.answerCallbackQuery();
     getChatState(ctx.from.id).awaiting = null;
-    await ctx.editMessageText(chatAiCharacterText(), {
+    await ctx.editMessageText(chatUserProfileText(getChatState(ctx.from.id)), {
       parse_mode: "HTML",
-      reply_markup: chatAiCharacterKeyboard()
+      reply_markup: chatUserProfileKeyboard()
     });
   });
 
   bot.callbackQuery("chat_user_profile", async (ctx) => {
     await ctx.answerCallbackQuery();
     getChatState(ctx.from.id).awaiting = null;
-    await ctx.editMessageText(savedUserProfilesText(), {
+    await ctx.editMessageText(chatUserProfileText(getChatState(ctx.from.id)), {
       parse_mode: "HTML",
-      reply_markup: savedUserProfilesKeyboard(ctx.from.id)
+      reply_markup: chatUserProfileKeyboard()
     });
   });
 
@@ -419,35 +434,36 @@ export function createBot() {
     const state = getChatState(ctx.from.id);
     const character = findSavedCharacter(ctx.from.id, name);
     state.userProfileName = character?.name ?? name;
-    state.userProfile = character ? renderUserProfileFromCharacter(character) : sampleUserProfiles[name] ?? `Мой персонаж: ${name}`;
+    state.userProfile = character ? renderUserProfileFromCharacter(character) : sampleUserProfiles[name] ?? `Моя роль: ${name}`;
     state.awaiting = null;
-    await ctx.editMessageText(userProfilePickedText(state.userProfileName), {
+    await ctx.editMessageText(savedCharactersText(state), {
       parse_mode: "HTML",
-      reply_markup: userProfileSavedKeyboard()
+      reply_markup: savedCharactersKeyboard(ctx.from.id)
     });
   });
 
   bot.callbackQuery("chat_user_profile_skip", async (ctx) => {
     await ctx.answerCallbackQuery();
-    getChatState(ctx.from.id).awaiting = null;
-    await ctx.editMessageText(chatAiCharacterText(), {
+    const state = getChatState(ctx.from.id);
+    state.awaiting = null;
+    await ctx.editMessageText(savedCharactersText(state), {
       parse_mode: "HTML",
-      reply_markup: chatAiCharacterKeyboard()
+      reply_markup: savedCharactersKeyboard(ctx.from.id)
     });
   });
 
   bot.callbackQuery("chat_ai_character", async (ctx) => {
     await ctx.answerCallbackQuery();
     getChatState(ctx.from.id).awaiting = null;
-    await ctx.editMessageText(chatAiCharacterText(), {
+    await ctx.editMessageText(savedCharactersText(getChatState(ctx.from.id)), {
       parse_mode: "HTML",
-      reply_markup: chatAiCharacterKeyboard()
+      reply_markup: savedCharactersKeyboard(ctx.from.id)
     });
   });
 
   bot.callbackQuery("chat_ai_character_saved", async (ctx) => {
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(savedCharactersText(), {
+    await ctx.editMessageText(savedCharactersText(getChatState(ctx.from.id)), {
       parse_mode: "HTML",
       reply_markup: savedCharactersKeyboard(ctx.from.id)
     });
@@ -455,11 +471,9 @@ export function createBot() {
 
   bot.callbackQuery("chat_ai_character_custom", async (ctx) => {
     await ctx.answerCallbackQuery();
-    getChatState(ctx.from.id).awaiting = "aiCharacter";
-    await ctx.editMessageText(aiCharacterTemplateText(), {
-      parse_mode: "HTML",
-      reply_markup: aiCharacterInputKeyboard()
-    });
+    await startCharacterInput(ctx.from.id, async (text, keyboard) => {
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    }, "chatAiCharacter");
   });
 
   bot.callbackQuery("character_create", async (ctx) => {
@@ -506,9 +520,9 @@ export function createBot() {
     const state = getChatState(ctx.from.id);
     state.aiCharacter ??= generatedAiCharacter;
     state.awaiting = null;
-    await ctx.editMessageText(aiCharacterPickedText(state.aiCharacter.name), {
+    await ctx.editMessageText(sceneBriefText(state), {
       parse_mode: "HTML",
-      reply_markup: aiCharacterSavedKeyboard()
+      reply_markup: sceneBriefKeyboard()
     });
   });
 
@@ -518,16 +532,37 @@ export function createBot() {
     const state = getChatState(ctx.from.id);
     state.aiCharacter = findSavedCharacter(ctx.from.id, name) ?? sampleAiCharacters[name] ?? generatedAiCharacter;
     state.awaiting = null;
-    await ctx.editMessageText(aiCharacterPickedText(state.aiCharacter.name), {
+    await ctx.editMessageText(sceneBriefText(state), {
       parse_mode: "HTML",
-      reply_markup: aiCharacterSavedKeyboard()
+      reply_markup: sceneBriefKeyboard()
+    });
+  });
+
+  bot.callbackQuery("scene_brief_write", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    getChatState(ctx.from.id).awaiting = "sceneBrief";
+    await ctx.editMessageText(sceneBriefInputText(), {
+      parse_mode: "HTML",
+      reply_markup: sceneBriefInputKeyboard()
+    });
+  });
+
+  bot.callbackQuery("scene_brief_skip", async (ctx) => {
+    await ctx.answerCallbackQuery("Пропущено");
+    const state = getChatState(ctx.from.id);
+    state.sceneBrief = undefined;
+    state.awaiting = null;
+    await ctx.editMessageText(chatModeStepText(state), {
+      parse_mode: "HTML",
+      reply_markup: chatModeStepKeyboard()
     });
   });
 
   bot.callbackQuery("chat_mode_step", async (ctx) => {
     await ctx.answerCallbackQuery();
-    getChatState(ctx.from.id).awaiting = null;
-    await ctx.editMessageText(chatModeStepText(), {
+    const state = getChatState(ctx.from.id);
+    state.awaiting = null;
+    await ctx.editMessageText(chatModeStepText(state), {
       parse_mode: "HTML",
       reply_markup: chatModeStepKeyboard()
     });
@@ -572,6 +607,15 @@ export function createBot() {
   });
 
   bot.callbackQuery("stop_active_chat", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const state = getChatState(ctx.from.id);
+    await ctx.editMessageText(confirmStopChatText(state), {
+      parse_mode: "HTML",
+      reply_markup: confirmStopChatKeyboard()
+    });
+  });
+
+  bot.callbackQuery("confirm_stop_active_chat", async (ctx) => {
     await ctx.answerCallbackQuery("Ролка остановлена");
     const state = getChatState(ctx.from.id);
     state.active = false;
@@ -582,8 +626,17 @@ export function createBot() {
     });
   });
 
+  bot.callbackQuery("cancel_exit_active_chat", async (ctx) => {
+    await ctx.answerCallbackQuery("Продолжаем ролку");
+    const state = getChatState(ctx.from.id);
+    await ctx.editMessageText(chatReadyText(state), {
+      parse_mode: "HTML",
+      reply_markup: chatReadyKeyboard()
+    });
+  });
+
   bot.callbackQuery("memory_save", async (ctx) => {
-    await ctx.answerCallbackQuery("Память собрана");
+    await ctx.answerCallbackQuery("Сводка собрана");
     const state = getChatState(ctx.from.id);
     await ctx.editMessageText(contextText(state), {
       parse_mode: "HTML",
@@ -646,6 +699,45 @@ export function createBot() {
     const chat = getUserProfile(ctx.from.id).savedChats.find((item) => item.id === id);
     await ctx.editMessageText(savedChatText(chat), {
       parse_mode: "HTML",
+      reply_markup: savedChatKeyboard(chat)
+    });
+  });
+
+  bot.callbackQuery(/^continue_saved_chat:/, async (ctx) => {
+    await ctx.answerCallbackQuery("Продолжаем ролку");
+    const id = ctx.callbackQuery.data.replace("continue_saved_chat:", "");
+    const chat = getUserProfile(ctx.from.id).savedChats.find((item) => item.id === id);
+    if (!chat) {
+      await ctx.editMessageText(savedChatText(), {
+        parse_mode: "HTML",
+        reply_markup: chatsKeyboard(ctx.from.id)
+      });
+      return;
+    }
+    restoreSavedChat(ctx.from.id, chat);
+    await ctx.editMessageText(savedChatContinueText(chat), {
+      parse_mode: "HTML",
+      reply_markup: chatConfirmKeyboard()
+    });
+  });
+
+  bot.callbackQuery(/^saved_chat_context:/, async (ctx) => {
+    await ctx.answerCallbackQuery("Сводка открыта");
+    const id = ctx.callbackQuery.data.replace("saved_chat_context:", "");
+    const chat = getUserProfile(ctx.from.id).savedChats.find((item) => item.id === id);
+    await ctx.editMessageText(savedChatContextText(chat), {
+      parse_mode: "HTML",
+      reply_markup: savedChatKeyboard(chat)
+    });
+  });
+
+  bot.callbackQuery(/^delete_saved_chat:/, async (ctx) => {
+    await ctx.answerCallbackQuery("Чат удален");
+    const id = ctx.callbackQuery.data.replace("delete_saved_chat:", "");
+    const profile = getUserProfile(ctx.from.id);
+    profile.savedChats = profile.savedChats.filter((chat) => chat.id !== id);
+    await ctx.editMessageText(chatsText(profile), {
+      parse_mode: "HTML",
       reply_markup: chatsKeyboard(ctx.from.id)
     });
   });
@@ -690,6 +782,15 @@ export function createBot() {
   });
 
   bot.callbackQuery("save_and_exit", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const state = getChatState(ctx.from.id);
+    await ctx.editMessageText(confirmSaveAndExitText(state), {
+      parse_mode: "HTML",
+      reply_markup: confirmSaveAndExitKeyboard()
+    });
+  });
+
+  bot.callbackQuery("confirm_save_and_exit", async (ctx) => {
     await ctx.answerCallbackQuery("Чат сохранен");
     const state = getChatState(ctx.from.id);
     const saved = saveCurrentChat(ctx.from.id, state);
@@ -699,6 +800,24 @@ export function createBot() {
     await ctx.editMessageText(chatSavedAndExitedText(saved), {
       parse_mode: "HTML",
       reply_markup: chatsKeyboard(ctx.from.id)
+    });
+  });
+
+  bot.callbackQuery("delete_active_chat", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const state = getChatState(ctx.from.id);
+    await ctx.editMessageText(confirmDeleteActiveChatText(state), {
+      parse_mode: "HTML",
+      reply_markup: confirmDeleteActiveChatKeyboard()
+    });
+  });
+
+  bot.callbackQuery("confirm_delete_active_chat", async (ctx) => {
+    await ctx.answerCallbackQuery("Чат удален");
+    resetChatState(ctx.from.id);
+    await ctx.editMessageText(activeChatDeletedText(), {
+      parse_mode: "HTML",
+      reply_markup: mainMenuKeyboard()
     });
   });
 
@@ -939,7 +1058,9 @@ function modeButtonLabel(mode: RpMode) {
 
 export function mainMenuKeyboard() {
   return new InlineKeyboard()
-    .text("🎭 Начать ролку", "new_chat")
+    .text("🎭 Новая ролка", "new_chat")
+    .row()
+    .text("🧠 Продолжить старую", "continue_old_chat")
     .row()
     .text("💬 Мои ролки", "my_chats")
     .text("👤 Персонажи", "characters")
@@ -958,8 +1079,6 @@ function awaitingInputKeyboard(backCallback: string) {
 function onboardingStartKeyboard() {
   return new InlineKeyboard()
     .text("🎭 Начать первую ролку", "onboarding_start")
-    .row()
-    .text("👤 Выбрать готового персонажа", "onboarding_goal:custom")
     .row()
     .text("❔ Как это работает", "onboarding_how");
 }
@@ -1004,15 +1123,8 @@ function onboardingFirstMessageKeyboard() {
     .text("✨ Дай стартовую сцену", "onboarding_starter_scene");
 }
 
-function newChatKeyboard() {
-  return new InlineKeyboard()
-    .text("👤 Мой персонаж", "chat_ai_character_saved")
-    .text("✨ Придумай за меня", "chat_ai_character_generate")
-    .row()
-    .text("✍️ Написать самому", "chat_ai_character_custom")
-    .row()
-    .text("🧠 Продолжить старую ролку", "chat_context_have")
-    .text("← Главное меню", "main_menu");
+function newChatKeyboard(userId?: number) {
+  return savedUserProfilesKeyboard(userId);
 }
 
 function chatContextAwaitingKeyboard() {
@@ -1025,7 +1137,7 @@ function chatContextAwaitingKeyboard() {
 
 function contextSavedKeyboard() {
   return new InlineKeyboard()
-    .text("Продолжить к выбору персонажа", "chat_user_profile")
+    .text("Продолжить к моей роли", "chat_user_profile")
     .row()
     .text("Изменить контекст", "chat_context_have")
     .text("← Главное меню", "main_menu");
@@ -1034,7 +1146,7 @@ function contextSavedKeyboard() {
 function chatUserProfileKeyboard() {
   return new InlineKeyboard()
     .text("📝 Дать анкету о себе", "chat_user_profile_template")
-    .text("👤 Мои персонажи", "chat_user_profile_saved")
+    .text("🧍 Мои роли", "chat_user_profile_saved")
     .row()
     .text("Пропустить", "chat_user_profile_skip")
     .text("← Назад", "chat_context_step");
@@ -1052,18 +1164,12 @@ function userProfileSavedKeyboard() {
   return new InlineKeyboard()
     .text("Продолжить к персонажу AI", "chat_ai_character")
     .row()
-    .text("Изменить персонажа", "chat_user_profile")
+    .text("Изменить мою роль", "chat_user_profile")
     .text("← Назад к выбору", "chat_user_profile");
 }
 
 function chatAiCharacterKeyboard() {
-  return new InlineKeyboard()
-    .text("👤 Мой персонаж", "chat_ai_character_saved")
-    .text("✨ Придумай за меня", "chat_ai_character_generate")
-    .row()
-    .text("✍️ Написать самому", "chat_ai_character_custom")
-    .row()
-    .text("← Назад", "new_chat");
+  return savedCharactersKeyboard();
 }
 
 function aiCharacterInputKeyboard() {
@@ -1074,7 +1180,7 @@ function aiCharacterInputKeyboard() {
 
 function aiCharacterSavedKeyboard() {
   return new InlineKeyboard()
-    .text("Продолжить к режиму", "chat_mode_step")
+    .text("Продолжить к замыслу сцены", "scene_brief_skip")
     .row()
     .text("Изменить персонажа AI", "chat_ai_character")
     .text("← Назад к персонажу", "chat_user_profile");
@@ -1094,7 +1200,9 @@ function savedCharactersKeyboard(userId?: number) {
     .text("Mira · пример", "chat_ai_character_pick:Mira")
     .text("Noah · пример", "chat_ai_character_pick:Noah")
     .row()
-    .text("➕ Создать для этого чата", "chat_ai_character_create")
+    .text("➕ Создать персонажа", "chat_ai_character_create")
+    .row()
+    .text("✨ Сгенерировать персонажа", "chat_ai_character_generate")
     .row()
     .text("← Назад", "chat_ai_character");
 }
@@ -1113,9 +1221,17 @@ function savedUserProfilesKeyboard(userId?: number) {
     .text("Mira · пример", "chat_user_profile_pick:Mira")
     .text("Noah · пример", "chat_user_profile_pick:Noah")
     .row()
-    .text("➕ Создать персонажа", "chat_user_character_create")
+    .text("➕ Создать мою роль", "chat_user_character_create")
     .row()
     .text("← Назад", "chat_context_step");
+}
+
+function sceneBriefSavedKeyboard() {
+  return new InlineKeyboard()
+    .text("Продолжить к стилю", "chat_mode_step")
+    .row()
+    .text("Изменить замысел", "scene_brief_write")
+    .text("Пропустить", "scene_brief_skip");
 }
 
 function aiGeneratedCharacterKeyboard() {
@@ -1123,8 +1239,24 @@ function aiGeneratedCharacterKeyboard() {
     .text("✅ Взять этого", "chat_ai_character_accept_generated")
     .text("🔄 Другой вариант", "chat_ai_character_generate")
     .row()
-    .text("✍️ Написать самому", "chat_ai_character_custom")
+    .text("➕ Создать персонажа", "chat_ai_character_create")
     .text("← Назад", "chat_ai_character");
+}
+
+function sceneBriefKeyboard() {
+  return new InlineKeyboard()
+    .text("✍️ Описать замысел", "scene_brief_write")
+    .row()
+    .text("Пропустить", "scene_brief_skip")
+    .text("← Назад к AI", "chat_ai_character");
+}
+
+function sceneBriefInputKeyboard() {
+  return new InlineKeyboard()
+    .text("Пропустить", "scene_brief_skip")
+    .row()
+    .text("← К стилю без замысла", "scene_brief_skip")
+    .text("← Главное меню", "main_menu");
 }
 
 function chatModeStepKeyboard() {
@@ -1139,8 +1271,6 @@ function chatModeStepKeyboard() {
     .text(modeButtonLabel("DARK_DRAMA"), "chat_mode:Dark Drama")
     .row()
     .text(modeButtonLabel("ADULT"), "adult_gate_chat")
-    .text(modeButtonLabel("PHOTO_SCENE"), "chat_mode:Photo Scene")
-    .row()
     .text("← Назад к персонажу", "chat_ai_character");
 }
 
@@ -1149,27 +1279,48 @@ function chatConfirmKeyboard() {
     .text("✅ Начать чат", "chat_start_confirmed")
     .row()
     .text("⚙️ Изменить режим", "chat_mode_step")
-    .text("👤 Изменить персонажа", "chat_ai_character")
+    .text("🤖 Изменить AI", "chat_ai_character")
     .row()
     .text("← Главное меню", "main_menu");
 }
 
 function chatReadyKeyboard() {
   return new InlineKeyboard()
-    .text("⏹ Закончить", "stop_active_chat")
-    .text("🧠 Сохранить память", "memory_save")
+    .text("⏸ Остановить", "stop_active_chat")
+    .text("🧠 Сводка сцены", "memory_save")
     .row()
-    .text("💾 Сохранить и выйти", "save_and_exit")
-    .text("🖼 Сделать сцену", "image_mode")
+    .text("💾 Сохранить чат", "save_and_exit")
+    .text("🖼 Фото сцены", "image_mode")
     .row()
-    .text("⭐ Снять лимиты", "subscription")
+    .text("⭐ Сохранить без лимитов", "subscription")
     .row()
-    .text("← Главное меню", "main_menu");
+    .text("🗑 Удалить чат", "delete_active_chat");
+}
+
+function confirmStopChatKeyboard() {
+  return new InlineKeyboard()
+    .text("⏸ Да, остановить", "confirm_stop_active_chat")
+    .row()
+    .text("← Вернуться в ролку", "cancel_exit_active_chat");
+}
+
+function confirmSaveAndExitKeyboard() {
+  return new InlineKeyboard()
+    .text("💾 Да, сохранить", "confirm_save_and_exit")
+    .row()
+    .text("← Вернуться в ролку", "cancel_exit_active_chat");
+}
+
+function confirmDeleteActiveChatKeyboard() {
+  return new InlineKeyboard()
+    .text("🗑 Да, удалить", "confirm_delete_active_chat")
+    .row()
+    .text("← Вернуться в ролку", "cancel_exit_active_chat");
 }
 
 function valueCheckpointKeyboard() {
   return new InlineKeyboard()
-    .text("🧠 Сохранить память", "memory_save")
+    .text("🧠 Сводка сцены", "memory_save")
     .row()
     .text("▶️ Продолжить бесплатно", "continue_free")
     .row()
@@ -1189,7 +1340,7 @@ function nonAdultModeRedirectKeyboard() {
 function stoppedChatKeyboard() {
   return new InlineKeyboard()
     .text("🎭 Новая ролка", "new_chat")
-    .text("🧠 Память", "context_export")
+    .text("🧠 Сводка", "context_export")
     .row()
     .text("⭐ Plus / Pro", "subscription")
     .text("← Главное меню", "main_menu");
@@ -1200,9 +1351,9 @@ function charactersKeyboard() {
     .text("➕ Создать персонажа", "library_character_create")
     .text("📋 Шаблон", "character_template")
     .row()
-    .text("🎭 Использовать в чате", "chat_ai_character_saved")
+    .text("🎭 Использовать в ролке", "chat_ai_character_saved")
     .row()
-    .text("⭐ Снять лимит", "subscription")
+    .text("⭐ Безлимит персонажей", "subscription")
     .text("← Главное меню", "main_menu");
 }
 
@@ -1217,13 +1368,27 @@ function modeSelectedKeyboard() {
 function chatsKeyboard(userId: number) {
   const keyboard = new InlineKeyboard();
   const chats = getUserProfile(userId).savedChats;
-  keyboard.text("🎭 Начать ролку", "new_chat").row();
+  if (!chats.length) {
+    return keyboard.text("🎭 Начать первую ролку", "new_chat").row().text("← Главное меню", "main_menu");
+  }
+  keyboard.text("🎭 Новая ролка", "new_chat").row();
   chats.slice(0, 8).forEach((chat, index) => {
     keyboard.text(chat.title, `saved_chat:${chat.id}`);
     if (index % 2 === 1) keyboard.row();
   });
   if (chats.length) keyboard.row().text("Удалить чат", "delete_chat_menu").row();
   return keyboard.text("⭐ Больше ролок в Plus", "subscription").text("← Главное меню", "main_menu");
+}
+
+function savedChatKeyboard(chat?: SavedChat) {
+  if (!chat) return new InlineKeyboard().text("← Мои ролки", "my_chats").text("← Главное меню", "main_menu");
+  return new InlineKeyboard()
+    .text("▶️ Продолжить эту ролку", `continue_saved_chat:${chat.id}`)
+    .row()
+    .text("🧠 Показать сводку", `saved_chat_context:${chat.id}`)
+    .row()
+    .text("🗑 Удалить", `delete_saved_chat:${chat.id}`)
+    .text("← Мои ролки", "my_chats");
 }
 
 function deleteChatKeyboard(userId: number) {
@@ -1247,8 +1412,6 @@ function modesKeyboard() {
     .text(modeButtonLabel("DARK_DRAMA"), "mode:drama")
     .row()
     .text(modeButtonLabel("ADULT"), "adult_gate")
-    .text(modeButtonLabel("PHOTO_SCENE"), "mode:photo")
-    .row()
     .text("← Главное меню", "main_menu");
 }
 
@@ -1306,14 +1469,6 @@ function adminUserKeyboard(telegramId: string) {
     .text("← Админка", "admin_panel");
 }
 
-function cabinetKeyboard() {
-  const keyboard = new InlineKeyboard();
-  if (appUrl && isHttpsUrl(appUrl)) {
-    keyboard.webApp("Открыть WebApp кабинет", appUrl).row();
-  }
-  return keyboard.text("← Главное меню", "main_menu");
-}
-
 function startAgeGateKeyboard() {
   return new InlineKeyboard().text("✅ Мне есть 18 лет", "start_age_accept").row().text("📄 Правила", "rules");
 }
@@ -1339,7 +1494,7 @@ function startText(firstName?: string) {
     "",
     "Здесь можно быстро начать ролку с персонажем: выбрать стиль, отправить первое сообщение и играть прямо в Telegram.",
     "",
-    "Если не знаешь, с чего начать, жми <b>«Начать ролку»</b> — бот проведет по шагам.",
+    "Если не знаешь, с чего начать, жми <b>«Новая ролка»</b> — бот проведет по шагам.",
     "",
     "Персонажей можно придумать самому, взять сохраненного или попросить Rolka предложить вариант. Сохраненные переписки доступны в <b>«Мои ролки»</b>."
   ].join("\n");
@@ -1442,10 +1597,10 @@ function helpText() {
   return [
     "<b>Как пользоваться Rolka</b>",
     "",
-    "1. Нажми «Начать ролку».",
-    "2. Выбери, кто будет отвечать.",
-    "3. Выбери стиль ролки.",
-    "4. Нажми «Начать» и отправь первое сообщение.",
+    "1. Нажми «Новая ролка».",
+    "2. Выбери свою роль или пропусти этот шаг.",
+    "3. Выбери персонажа, которым будет отвечать AI.",
+    "4. Выбери стиль и отправь первое сообщение.",
     "",
     "Если продолжаешь старую переписку, выбери «Продолжить старую ролку» и вставь, что уже произошло.",
     "",
@@ -1456,19 +1611,21 @@ function helpText() {
 
 function newChatText() {
   return [
-    "🎭 <b>Начать ролку</b>",
+    "🎭 <b>Новая ролка</b>",
     "",
-    "<b>Шаг 1 из 3 — кто будет отвечать?</b>",
+    "<b>Новая ролка: шаг 1 из 5 — твоя роль.</b>",
     "",
-    "Выбери персонажа для Rolka. Можно взять готового, написать своего или попросить бота придумать вариант.",
+    "Сначала выбери, кем будешь ты в сцене. Можно взять сохраненную роль, создать новую или пропустить.",
     "",
-    "Если ты продолжаешь старую переписку, нажми <b>«Продолжить старую ролку»</b> и вставь кратко, что уже произошло."
+    "Персонажа, которым будет отвечать AI, выберешь на следующем шаге."
   ].join("\n");
 }
 
 function chatContextHaveText() {
   return [
     "🧠 <b>Продолжить старую ролку</b>",
+    "",
+    "<b>Продолжение: шаг 1 из 5 — старый контекст.</b>",
     "",
     "Отправь одним сообщением, что уже произошло в прошлой переписке.",
     "",
@@ -1479,23 +1636,24 @@ function chatContextHaveText() {
     "• какие отношения и обещания важны;",
     "• какой тон переписки сохранить.",
     "",
-    "После этого выберешь персонажа и стиль ролки."
+    "После этого выберешь свою роль, персонажа AI, замысел сцены и стиль ролки."
   ].join("\n");
 }
 
 function chatUserProfileText(state?: ChatDraft) {
+  const title = state?.context ? "🧠 <b>Продолжение: шаг 2 из 5 — твоя роль.</b>" : "🎭 <b>Новая ролка: шаг 1 из 5 — твоя роль.</b>";
   return [
-    "📝 <b>Твоя роль в сцене</b>",
+    title,
     "",
     state?.userProfileName ? `Сейчас выбрано: <b>${escapeHtml(state.userProfileName)}</b>` : "Выбери персонажа из списка или создай нового.",
     "",
-    "Этот персонаж будет твоей ролью в сцене."
+    "Это твоя роль в сцене. Персонажа, которым будет отвечать AI, выберешь отдельно."
   ].join("\n");
 }
 
 function savedUserProfilesText() {
   return [
-    "👤 <b>Шаг 2 из 5 — выбор персонажа.</b>",
+    "🧍 <b>Выбор твоей роли.</b>",
     "",
     "Выбери персонажа из списка или создай нового.",
     "",
@@ -1507,7 +1665,7 @@ function userProfilePickedText(name: string) {
   return [
     `✅ <b>Твоя роль выбрана:</b> ${escapeHtml(name)}`,
     "",
-    "Теперь нужно выбрать, кем будет отвечать нейронка: использовать одного из сохраненных персонажей, написать нового или попросить AI предложить вариант."
+    "Теперь выбери персонажа, которым будет отвечать AI: сохраненного, нового или предложенного ботом."
   ].join("\n");
 }
 
@@ -1517,7 +1675,7 @@ function userProfileTemplateText() {
     "",
     "Скопируй и заполни максимально подробно:",
     "",
-    "<code>Мой персонаж:",
+    "<code>Моя роль:",
     "Имя:",
     "Возраст:",
     "Внешность:",
@@ -1527,28 +1685,29 @@ function userProfileTemplateText() {
     "Границы/запреты:",
     "Какая динамика нужна:</code>",
     "",
-    "Отправь заполненную анкету следующим сообщением. После сохранения появится кнопка продолжения."
+    "Отправь заполненную анкету следующим сообщением. После сохранения сразу откроется выбор персонажа AI."
   ].join("\n");
 }
 
-function chatAiCharacterText() {
+function chatAiCharacterText(state?: ChatDraft) {
+  const title = state?.context ? "🧠 <b>Продолжение: шаг 3 из 5 — персонаж AI.</b>" : "🤖 <b>Новая ролка: шаг 2 из 5 — персонаж AI.</b>";
   return [
-    "👤 <b>Шаг 1 из 3 — кто будет отвечать?</b>",
+    title,
     "",
-    "Выбери персонажа для Rolka.",
+    "Выбери персонажа, которым будет отвечать Rolka.",
     "",
     "Можно взять сохраненного, написать своего или попросить бота придумать персонажа под сцену."
   ].join("\n");
 }
 
-function savedCharactersText() {
+function savedCharactersText(state?: ChatDraft) {
+  const title = state?.context ? "🧠 <b>Продолжение: шаг 3 из 5 — персонаж AI.</b>" : "🤖 <b>Новая ролка: шаг 2 из 5 — персонаж AI.</b>";
   return [
-    "👤 <b>Мои персонажи</b>",
+    title,
     "",
-    "Выбери персонажа, которым будет отвечать AI, или создай нового прямо для этого чата.",
+    "Выбери персонажа, которым будет отвечать AI.",
     "",
-    "<b>Free:</b> 3 персонажа.",
-    "<b>Plus/Pro:</b> безлимит."
+    "В меню есть сохраненные персонажи, два шаблона, создание нового персонажа и генерация."
   ].join("\n");
 }
 
@@ -1569,7 +1728,7 @@ function aiCharacterTemplateText() {
     "Границы/запреты:",
     "Стартовая сцена:</code>",
     "",
-    "Отправь карточку следующим сообщением. После сохранения появится кнопка перехода к режиму."
+    "Отправь карточку следующим сообщением. После сохранения сразу откроется шаг с замыслом сцены."
   ].join("\n");
 }
 
@@ -1596,9 +1755,48 @@ function aiCharacterPickedText(name: string) {
   ].join("\n");
 }
 
-function chatModeStepText() {
+function sceneBriefText(state: ChatDraft) {
+  const characterName = state.aiCharacter?.name ?? generatedAiCharacter.name;
+  const title = state.context ? "🎬 <b>Продолжение: шаг 4 из 5 — замысел сцены.</b>" : "🎬 <b>Новая ролка: шаг 3 из 5 — замысел сцены.</b>";
   return [
-    "🎛 <b>Шаг 2 из 3 — стиль ролки.</b>",
+    title,
+    "",
+    `<b>Персонаж AI:</b> ${escapeHtml(characterName)}`,
+    "",
+    "Опиши, о чем должна быть ролка: настроение, конфликт, отношения, место или стартовую ситуацию.",
+    "",
+    "Можно пропустить — тогда Rolka начнет без дополнительного замысла."
+  ].join("\n");
+}
+
+function sceneBriefInputText() {
+  return [
+    "🎬 <b>Опиши замысел сцены</b>",
+    "",
+    "Отправь одним сообщением, какую ролку хочешь получить.",
+    "",
+    "<b>Примеры:</b>",
+    "• медленное сближение после ссоры;",
+    "• темная драма в закрытом городе;",
+    "• приключение с выбором и последствиями;",
+    "• разговор двух бывших союзников."
+  ].join("\n");
+}
+
+function sceneBriefSavedText(state: ChatDraft) {
+  return [
+    "✅ <b>Замысел сцены сохранен.</b>",
+    "",
+    state.sceneBrief ? escapeHtml(state.sceneBrief) : "Замысел не указан.",
+    "",
+    "Теперь выбери стиль ответа Rolka."
+  ].join("\n");
+}
+
+function chatModeStepText(state?: ChatDraft) {
+  const title = state?.context ? "🧠 <b>Продолжение: шаг 5 из 5 — стиль ролки.</b>" : "🎛 <b>Новая ролка: шаг 4 из 5 — стиль ролки.</b>";
+  return [
+    title,
     "",
     "Выбери, как Rolka должна отвечать. Все стили доступны сразу.",
     "",
@@ -1607,16 +1805,19 @@ function chatModeStepText() {
 }
 
 function chatConfirmText(state: ChatDraft) {
+  const title = state.context ? "✅ <b>Продолжение: все готово.</b>" : "✅ <b>Новая ролка: шаг 5 из 5 — все готово.</b>";
   return [
-    "✅ <b>Шаг 3 из 3 — все готово.</b>",
+    title,
     "",
-    `<b>Персонаж:</b> ${escapeHtml(state.aiCharacter?.name ?? generatedAiCharacter.name)}`,
+    state.userProfileName ? `<b>Твоя роль:</b> ${escapeHtml(state.userProfileName)}` : "<b>Твоя роль:</b> не указана",
+    `<b>Персонаж AI:</b> ${escapeHtml(state.aiCharacter?.name ?? generatedAiCharacter.name)}`,
     `<b>Стиль:</b> ${escapeHtml(modeButtonLabel(state.mode ?? "CLASSIC"))}`,
     state.context ? "<b>Старая ролка:</b> добавлена" : "<b>Старая ролка:</b> с нуля",
+    state.sceneBrief ? `<b>Замысел:</b> ${escapeHtml(state.sceneBrief)}` : "<b>Замысел:</b> не указан",
     "",
     "Нажми <b>«Начать чат»</b>, а потом просто отправь первое сообщение персонажу.",
     "",
-    "Вернуться и поменять стиль или персонажа можно кнопками ниже."
+    "Вернуться и поменять стиль или персонажа AI можно кнопками ниже."
   ].join("\n");
 }
 
@@ -1626,7 +1827,7 @@ function contextSavedText(state: ChatDraft) {
     "",
     `<b>Объем:</b> ${state.context?.length ?? 0} символов`,
     "",
-    "Теперь можно добавить твою роль в сцене или пропустить этот шаг."
+    "Теперь выбери свою роль в сцене или пропусти этот шаг."
   ].join("\n");
 }
 
@@ -1657,13 +1858,15 @@ function chatReadyText(state: ChatDraft, completedOnboardingNow = false) {
     completedOnboardingNow ? "🎓 <b>Обучение завершено.</b> Теперь в главном меню открыт обычный бот со всеми функциями." : "",
     completedOnboardingNow ? "" : "",
     `<b>Стиль:</b> ${escapeHtml(modeButtonLabel(state.mode ?? "CLASSIC"))}`,
-    `<b>Персонаж:</b> ${escapeHtml(state.aiCharacter?.name ?? generatedAiCharacter.name)}`,
+    state.userProfileName ? `<b>Твоя роль:</b> ${escapeHtml(state.userProfileName)}` : "",
+    `<b>Персонаж AI:</b> ${escapeHtml(state.aiCharacter?.name ?? generatedAiCharacter.name)}`,
+    state.sceneBrief ? `<b>Замысел:</b> ${escapeHtml(state.sceneBrief)}` : "",
     state.context ? "<b>Старая ролка:</b> учтена" : "<b>Старая ролка:</b> с нуля",
     "",
     "Теперь напиши первое сообщение, и персонаж ответит.",
     "",
-    "Кнопки ниже помогут закончить ролку, сохранить память, сделать фото сцены или снять лимиты."
-  ].filter((line) => line !== null).join("\n");
+    "Кнопки ниже: <b>Сводка сцены</b> нужна для ручного продолжения, <b>Сохранить чат</b> добавит переписку в «Мои ролки», <b>Фото сцены</b> подготовит визуал."
+  ].filter(Boolean).join("\n");
 }
 
 function valueCheckpointText() {
@@ -1689,13 +1892,51 @@ function nonAdultModeRedirectText(state: ChatDraft) {
   ].join("\n");
 }
 
+function confirmStopChatText(state: ChatDraft) {
+  return [
+    "⏸ <b>Остановить ролку?</b>",
+    "",
+    `Сообщений в текущей памяти: <b>${state.messages.length}</b>`,
+    "",
+    "Чат останется в текущей сессии, но активная переписка закончится. Если хочешь потом вернуться к этой сцене через «Мои ролки», лучше нажми <b>«Сохранить чат»</b>."
+  ].join("\n");
+}
+
+function confirmSaveAndExitText(state: ChatDraft) {
+  return [
+    "💾 <b>Сохранить чат и выйти?</b>",
+    "",
+    `Сообщений будет сохранено: <b>${state.messages.length}</b>`,
+    "",
+    "Ролка появится в разделе <b>«Мои ролки»</b>, откуда ее можно будет продолжить."
+  ].join("\n");
+}
+
+function confirmDeleteActiveChatText(state: ChatDraft) {
+  return [
+    "🗑 <b>Удалить текущий чат?</b>",
+    "",
+    `Сообщений будет удалено из текущей сессии: <b>${state.messages.length}</b>`,
+    "",
+    "Это действие не сохранит ролку в <b>«Мои ролки»</b>. Если история нужна, сначала нажми <b>«Сохранить чат»</b>."
+  ].join("\n");
+}
+
 function stopText(state: ChatDraft) {
   return [
-    "⏹ <b>Ролка остановлена.</b>",
+    "⏸ <b>Ролка остановлена.</b>",
     "",
     `Сообщений в памяти: <b>${state.messages.length}</b>`,
     "",
-    "Можно сохранить память, начать новую ролку или снять лимиты."
+    "Можно открыть сводку сцены, начать новую ролку или сохранить текущую как чат."
+  ].join("\n");
+}
+
+function activeChatDeletedText() {
+  return [
+    "🗑 <b>Текущий чат удален.</b>",
+    "",
+    "Ролка не сохранена в «Мои ролки». Можно начать новую или продолжить старую из главного меню."
   ].join("\n");
 }
 
@@ -1774,7 +2015,7 @@ function characterLimitText(profile: UserRuntimeProfile) {
     "",
     `Сейчас сохранено: <b>${profile.characters.length}/3</b>.`,
     "",
-    "В Free можно создать 3 персонажа. Plus/Pro открывает безлимит."
+    "Plus открывает безлимит персонажей, чтобы не удалять старые роли и карточки AI."
   ].join("\n");
 }
 
@@ -1791,11 +2032,11 @@ function libraryCharacterSavedText(character: PromptCharacter) {
 function chatsText(profile: UserRuntimeProfile) {
   if (!profile.savedChats.length) {
     return [
-      "💬 <b>Мои чаты</b>",
+      "💬 <b>Мои ролки</b>",
       "",
       "Сохраненных чатов пока нет.",
       "",
-      "Во время переписки нажми <b>«Сохранить и выйти»</b>, чтобы чат появился здесь."
+      "Во время переписки нажми <b>«Сохранить чат»</b>, чтобы ролка появилась здесь."
     ].join("\n");
   }
   return [
@@ -1833,8 +2074,40 @@ function savedChatText(chat?: SavedChat) {
     `<b>Персонаж AI:</b> ${escapeHtml(chat.aiCharacterName)}`,
     `<b>Сохранен:</b> ${formatDateTime(chat.savedAt)}`,
     "",
-    lastMessages ? `<b>Последние сообщения:</b>\n${escapeHtml(lastMessages.slice(-2500))}` : "Сообщений в чате пока нет."
+    lastMessages ? `<b>Последние сообщения:</b>\n${escapeHtml(lastMessages.slice(-2500))}` : "Сообщений в чате пока нет.",
+    "",
+    "Можно продолжить эту ролку, открыть сводку или удалить сохранение."
   ].join("\n");
+}
+
+function savedChatContinueText(chat: SavedChat) {
+  return [
+    "▶️ <b>Ролка подготовлена к продолжению.</b>",
+    "",
+    `<b>Персонаж AI:</b> ${escapeHtml(chat.aiCharacterName)}`,
+    `<b>Стиль:</b> ${escapeHtml(modeButtonLabel(chat.mode))}`,
+    chat.sceneBrief ? `<b>Замысел:</b> ${escapeHtml(chat.sceneBrief)}` : "<b>Замысел:</b> не указан",
+    "",
+    "Контекст, последние сообщения и твоя роль уже добавлены. Нажми <b>«Начать чат»</b>, чтобы продолжить."
+  ].join("\n");
+}
+
+function savedChatContextText(chat?: SavedChat) {
+  if (!chat) return savedChatText();
+  const transcript = chat.messages
+    .map((message) => `${message.role === "user" ? "Пользователь" : "AI"}: ${message.content}`)
+    .join("\n\n");
+  const text = [
+    `🧠 <b>Сводка ролки: ${escapeHtml(chat.title)}</b>`,
+    "",
+    chat.context ? `<b>Импортированный контекст:</b>\n${escapeHtml(chat.context)}` : "<b>Импортированный контекст:</b> не добавлен",
+    chat.sceneBrief ? `<b>Замысел сцены:</b>\n${escapeHtml(chat.sceneBrief)}` : "<b>Замысел сцены:</b> не указан",
+    chat.userProfile ? `<b>Твоя роль:</b>\n${escapeHtml(chat.userProfile)}` : "<b>Твоя роль:</b> не добавлена",
+    "",
+    "<b>Последние сообщения:</b>",
+    escapeHtml(transcript.slice(-2800))
+  ].filter(Boolean).join("\n");
+  return text.length > 3900 ? `${text.slice(0, 3800)}\n\n...сводка обрезана для лимита Telegram.` : text;
 }
 
 function chatSavedAndExitedText(chat: SavedChat) {
@@ -1844,7 +2117,7 @@ function chatSavedAndExitedText(chat: SavedChat) {
     `<b>Название:</b> ${escapeHtml(chat.title)}`,
     `<b>Сообщений:</b> ${chat.messages.length}`,
     "",
-    "Чат завершен и доступен в разделе <b>Мои чаты</b>."
+    "Чат остановлен и доступен в разделе <b>Мои ролки</b>. Там его можно продолжить, открыть сводку или удалить."
   ].join("\n");
 }
 
@@ -1869,16 +2142,16 @@ function contextText(state?: ChatDraft) {
   }
 
   return [
-    "🧠 <b>Память ролки</b>",
+    "🧠 <b>Сводка сцены</b>",
     "",
-    "Если персонаж начал забывать детали, сохрани память и вставь ее при новой ролке:",
+    "Если персонаж начал забывать детали, открой сводку и вставь ее при продолжении ролки:",
     "• что уже произошло;",
     "• кто с кем в каких отношениях;",
     "• важные факты;",
     "• где остановилась сцена;",
     "• стиль переписки.",
     "",
-    "Потом нажми «Начать ролку» → «Продолжить старую ролку»."
+    "Потом нажми «Продолжить старую» в главном меню."
   ].join("\n");
 }
 
@@ -1892,8 +2165,7 @@ function modesText() {
     "<b>❤️ Медленная</b> — постепенные отношения и сюжет.",
     "<b>🧭 Приключение</b> — мир, NPC, выборы и последствия.",
     "<b>🕯 Темная драма</b> — напряженные взрослые темы в рамках правил.",
-    "<b>🔞 18+</b> — только после подтверждения возраста.",
-    "<b>🖼 Фото сцены</b> — описание сцены для картинки."
+    "<b>🔞 18+</b> — только после подтверждения возраста."
   ].join("\n");
 }
 
@@ -1968,6 +2240,8 @@ function subscriptionText() {
   return [
     "⭐ <b>Plus / Pro</b>",
     "",
+    "Платный доступ нужен, чтобы не терять персонажей, ролки и полную память сцен, когда Free становится тесным.",
+    "",
     "<b>Free</b>",
     "• 3 персонажа",
     "• 3 ролки",
@@ -1995,7 +2269,7 @@ function chatLimitText(profile: UserRuntimeProfile) {
     "",
     `Создано ролок в текущей сессии: <b>${profile.chatsStarted}/3</b>.`,
     "",
-    "Plus/Pro дают больше ролок, длинную память и удобное продолжение историй."
+    "Plus открывает больше ролок и удобное продолжение историй без пересбора контекста с нуля."
   ].join("\n");
 }
 
@@ -2005,7 +2279,7 @@ function adultLimitText(profile: UserRuntimeProfile) {
     "",
     `Использовано: <b>${profile.adultMessages}/15</b>.`,
     "",
-    "Чтобы продолжить 18+ RP без ограничения, подключи Plus или Pro."
+    "Чтобы продолжить приватную сцену в рамках правил, подключи Plus или Pro."
   ].join("\n");
 }
 
@@ -2019,28 +2293,6 @@ function rulesText() {
     "• Уважай границы персонажа и заданные запреты.",
     "• Не пытайся обходить лимиты Free удалением чатов."
   ].join("\n");
-}
-
-function cabinetText() {
-  if (appUrl && isHttpsUrl(appUrl)) {
-    return "🗝 <b>WebApp кабинет</b>\n\nОткрой кабинет кнопкой ниже: там будет удобная красивая переписка, персонажи, чаты и экспорт контекста.";
-  }
-  return [
-    "🗝 <b>WebApp кабинет</b>",
-    "",
-    "Сейчас сайт запущен локально на <code>http://localhost:3000</code>.",
-    "Telegram Mini App открывает только публичные HTTPS-ссылки.",
-    "",
-    "Поэтому обычный Telegram-бот работает здесь, а красивую WebApp-переписку подключим через ngrok/Cloudflare Tunnel или деплой."
-  ].join("\n");
-}
-
-function isHttpsUrl(value: string) {
-  try {
-    return new URL(value).protocol === "https:";
-  } catch {
-    return false;
-  }
 }
 
 function escapeHtml(value: string) {
@@ -2356,13 +2608,19 @@ async function saveAwaitingInput(
     state.userProfile = content;
     state.userProfileName = "анкета вручную";
     state.awaiting = null;
-    await reply(userProfileSavedText(state), userProfileSavedKeyboard());
+    await reply(savedCharactersText(state), savedCharactersKeyboard(userId));
     return;
   }
   if (state.awaiting === "aiCharacter") {
     state.aiCharacter = parseManualAiCharacter(content);
     state.awaiting = null;
-    await reply(aiCharacterSavedText(state), aiCharacterSavedKeyboard());
+    await reply(sceneBriefText(state), sceneBriefKeyboard());
+    return;
+  }
+  if (state.awaiting === "sceneBrief") {
+    state.sceneBrief = content;
+    state.awaiting = null;
+    await reply(sceneBriefSavedText(state), sceneBriefSavedKeyboard());
     return;
   }
   if (state.awaiting === "libraryCharacter" || state.awaiting === "chatAiCharacter" || state.awaiting === "chatUserCharacter") {
@@ -2373,13 +2631,13 @@ async function saveAwaitingInput(
     state.awaiting = null;
     if (target === "chatAiCharacter") {
       state.aiCharacter = character;
-      await reply(aiCharacterSavedText(state), aiCharacterSavedKeyboard());
+      await reply(sceneBriefText(state), sceneBriefKeyboard());
       return;
     }
     if (target === "chatUserCharacter") {
       state.userProfileName = character.name;
       state.userProfile = renderUserProfileFromCharacter(character);
-      await reply(userProfileSavedText(state), userProfileSavedKeyboard());
+      await reply(savedCharactersText(state), savedCharactersKeyboard(userId));
       return;
     }
     await reply(libraryCharacterSavedText(character), charactersKeyboard());
@@ -2427,14 +2685,50 @@ function saveCurrentChat(userId: number, state: ChatDraft): SavedChat {
     id: createRuntimeId(),
     title: buildSavedChatTitle(state, savedAt),
     mode: state.mode ?? "CLASSIC",
+    aiCharacter: state.aiCharacter ?? generatedAiCharacter,
     aiCharacterName: state.aiCharacter?.name ?? generatedAiCharacter.name,
     savedAt,
     messages: [...state.messages],
     context: state.context,
+    sceneBrief: state.sceneBrief,
     userProfile: state.userProfile
   };
   profile.savedChats.unshift(saved);
   return saved;
+}
+
+function restoreSavedChat(userId: number, chat: SavedChat) {
+  const state: ChatDraft = {
+    awaiting: null,
+    active: false,
+    context: buildSavedChatImportedContext(chat),
+    sceneBrief: chat.sceneBrief,
+    userProfile: chat.userProfile,
+    userProfileName: chat.userProfile ? "сохраненная роль" : undefined,
+    aiCharacter: chat.aiCharacter ?? {
+      ...generatedAiCharacter,
+      name: chat.aiCharacterName,
+      description: `Сохраненный персонаж AI: ${chat.aiCharacterName}`
+    },
+    mode: chat.mode,
+    messages: [...chat.messages]
+  };
+  chatStates.set(userId, state);
+  return state;
+}
+
+function buildSavedChatImportedContext(chat: SavedChat) {
+  const transcript = chat.messages
+    .slice(-12)
+    .map((message) => `${message.role === "user" ? "Пользователь" : "AI"}: ${message.content}`)
+    .join("\n\n");
+  return [
+    chat.context ? `Старый контекст:\n${chat.context}` : null,
+    chat.sceneBrief ? `Замысел сцены:\n${chat.sceneBrief}` : null,
+    transcript ? `Последние сообщения сохраненной ролки:\n${transcript}` : null
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function buildSavedChatTitle(state: ChatDraft, savedAt: Date) {
@@ -2591,6 +2885,7 @@ async function handleActiveChatMessage(
 function buildImportedContext(state: ChatDraft) {
   return [
     state.context ? `Старый контекст:\n${state.context}` : null,
+    state.sceneBrief ? `Замысел сцены:\n${state.sceneBrief}` : null,
     state.userProfile ? `Анкета персонажа пользователя:\n${state.userProfile}` : null
   ]
     .filter(Boolean)
@@ -2627,7 +2922,7 @@ function findSavedCharacter(userId: number, idOrName: string): SavedCharacter | 
 
 function renderUserProfileFromCharacter(character: PromptCharacter) {
   return [
-    `Мой персонаж: ${character.name}`,
+    `Моя роль: ${character.name}`,
     `Возраст: ${character.age}`,
     `Описание: ${character.description}`,
     character.appearance ? `Внешность: ${character.appearance}` : null,
