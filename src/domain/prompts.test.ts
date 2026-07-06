@@ -16,9 +16,12 @@ describe("prompt pipeline", () => {
     expect(messages[0].content).toContain("Любой adult/18+ контент допустим");
     expect(messages[0].content).toContain("Никогда не используй шаблонные ИИ-фразы");
     expect(messages[0].content).toContain("Не отыгрывай действия, мысли, эмоции, реплики и решения за персонажа пользователя");
+    expect(messages[0].content).toContain("Персонаж не должен постоянно подстраиваться");
+    expect(messages[0].content).toContain("не решай исход за обоих");
     expect(messages[0].content).toContain("«Я здесь. Я рядом. Я никуда не уйду»");
     expect(messages[0].content).toContain("Режим: CINEMATIC");
     expect(messages[0].content).toContain("Режим Cinematic");
+    expect(messages[0].content).toContain("Если текущий режим НЕ ADULT");
     expect(messages[0].content).toContain("Имя: Mira");
     expect(messages[0].content).toContain("Neon Harbor");
     expect(messages[1]).toEqual({ role: "user", content: "Continue." });
@@ -35,5 +38,6 @@ describe("prompt pipeline", () => {
     expect(messages[0].content).toContain("все персонажи совершеннолетние");
     expect(messages[0].content).toContain("взаимодействие добровольное");
     expect(messages[0].content).toContain("Никогда не включай несовершеннолетних");
+    expect(messages[0].content).not.toContain("Если текущий режим НЕ ADULT");
   });
 });

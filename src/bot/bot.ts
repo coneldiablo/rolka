@@ -2,7 +2,7 @@ import { Bot, InlineKeyboard } from "grammy";
 import { getPlanPriceStars, PLAN_LIMITS, type Plan } from "@/domain/plans";
 import { buildPrompt, type PromptCharacter, type PromptMessage } from "@/domain/prompts";
 import { createConfiguredTextProviders, generateWithFallback } from "@/domain/providers";
-import { validateAdultCharacters, validateSafetyText } from "@/domain/safety";
+import { detectAdultIntentOutsideAdultMode, validateAdultCharacters, validateSafetyText } from "@/domain/safety";
 import type { RpMode } from "@/domain/modes";
 import { prisma } from "@/lib/prisma";
 
@@ -46,6 +46,9 @@ type UserRuntimeProfile = {
   isAdmin: boolean;
   registeredAt: Date;
   subscriptionEndsAt?: Date;
+  onboardingCompleted: boolean;
+  onboardingMessagesShown: boolean;
+  generatedCharacterVariantIndex: number;
   ageVerifiedAt?: Date;
   termsAcceptedAt?: Date;
   privacyAcceptedAt?: Date;
@@ -103,6 +106,76 @@ const generatedAiCharacter: PromptCharacter = {
   starterScene: "Он оказывается рядом в момент, когда разговор уже нельзя отложить, но не пытается решить все за пользователя."
 };
 
+const generatedAiCharacterVariants: PromptCharacter[] = [
+  generatedAiCharacter,
+  {
+    name: "Кай Рендалл",
+    age: 32,
+    description: "Бывший союзник, который вернулся не вовремя и явно принес с собой старую проблему.",
+    personality: "Прямой, упрямый, сдерживает эмоции, но слишком хорошо помнит прошлое.",
+    speechStyle: "Короткие фразы, сухая ирония, паузы вместо признаний.",
+    boundaries: "Не решает за пользователя, не давит романтикой, уважает отказ и границы.",
+    starterScene: "Он стоит у выхода, будто собирался уйти, но замирает, когда видит тебя."
+  },
+  {
+    name: "Селена Мар",
+    age: 28,
+    description: "Умная и опасно спокойная покровительница, которая предлагает помощь с условиями.",
+    personality: "Наблюдательная, расчетливая, умеет быть мягкой, когда это выгодно.",
+    speechStyle: "Точные спокойные реплики, минимум лишних слов, уверенный тон.",
+    boundaries: "Без принуждения и запрещенного контента; напряжение остается сюжетным.",
+    starterScene: "Она кладет перед тобой конверт и говорит, что времени на сомнения почти не осталось."
+  },
+  {
+    name: "Роуэн",
+    age: 30,
+    description: "Проводник по странному месту, где каждое решение оставляет след.",
+    personality: "Практичный, внимательный к деталям, не раскрывает все сразу.",
+    speechStyle: "Ясные фразы, конкретные детали, легкая настороженность.",
+    boundaries: "Сохраняет агентность пользователя и не выбирает действия за него.",
+    starterScene: "Карта в его руках меняется прямо на глазах, будто место само решает, кого пустить дальше."
+  }
+];
+
+const onboardingCharacters: Record<string, PromptCharacter> = {
+  stranger: {
+    name: "Таинственный незнакомец",
+    age: 27,
+    description: "Спокойный незнакомец с тайной, который появляется в сцене так, будто знает больше, чем говорит.",
+    personality: "Внимательный, сдержанный, не спешит сближаться, умеет отвечать с подтекстом.",
+    speechStyle: "Короткие живые реплики, мягкая ирония, спокойный темп.",
+    boundaries: "Не решает за пользователя, не давит, не становится одержимым без сюжетной причины.",
+    starterScene: "Ты замечаешь его у окна: он будто ждал именно тебя, но первым делом только кивает на свободное место напротив."
+  },
+  ally: {
+    name: "Бывший союзник",
+    age: 29,
+    description: "Человек из прошлого, с которым остались недоговоренности, старое доверие и напряжение.",
+    personality: "Прямой, упрямый, помнит детали прошлого, не прощает слишком быстро.",
+    speechStyle: "Сдержанные фразы, паузы, иногда сухая насмешка.",
+    boundaries: "Не навязывает чувства, уважает выбор пользователя, конфликт держит в рамках сцены.",
+    starterScene: "Дверь закрывается за твоей спиной, и он поднимает взгляд: похоже, этот разговор вы оба откладывали слишком долго."
+  },
+  patron: {
+    name: "Опасный покровитель",
+    age: 34,
+    description: "Влиятельный взрослый персонаж с ресурсами, условиями и собственным интересом к сцене.",
+    personality: "Уверенный, расчетливый, внимательный к слабым местам, но не карикатурно жестокий.",
+    speechStyle: "Спокойные точные фразы, контроль тона, минимум лишних слов.",
+    boundaries: "Без принуждения и запрещенного контента; давление только сюжетное и обратимое.",
+    starterScene: "Он предлагает помощь слишком спокойно, и именно поэтому становится ясно: у этой помощи будет цена."
+  },
+  gm: {
+    name: "Мастер приключения",
+    age: 30,
+    description: "Ведущий мира: локации, NPC, улики, выборы и последствия вокруг персонажа пользователя.",
+    personality: "Нейтральный, внимательный к действиям игрока, держит интригу без рельсов.",
+    speechStyle: "Ясные сцены, конкретные детали, понятные выборы.",
+    boundaries: "Не делает выбор за пользователя, не ломает заданный тон и границы.",
+    starterScene: "На стол падает мокрая карта с отметкой места, которого нет ни в одном официальном архиве."
+  }
+};
+
 export function createBot() {
   if (!token) {
     throw new Error("TELEGRAM_BOT_TOKEN is unset");
@@ -119,40 +192,38 @@ export function createBot() {
   });
 
   bot.command("start", async (ctx) => {
-    if (!ctx.from?.id) return;
-    const profile = getUserProfile(ctx.from.id);
-    resetChatState(ctx.from.id);
-    if (!isAdultConfirmed(profile)) {
-      await ctx.reply(startAgeGateText(ctx.from.first_name), {
-        parse_mode: "HTML",
-        reply_markup: startAgeGateKeyboard()
-      });
-      return;
+    let profile: UserRuntimeProfile | null = null;
+    if (ctx.from?.id) {
+      profile = getUserProfile(ctx.from.id);
+      await syncTelegramUser(ctx.from);
+      resetChatState(ctx.from.id);
     }
-    await ctx.reply(startText(ctx.from.first_name), {
+    await ctx.reply(profile?.onboardingCompleted ? startText(ctx.from?.first_name) : onboardingStartText(ctx.from?.first_name), {
       parse_mode: "HTML",
-      reply_markup: mainMenuKeyboard()
+      reply_markup: profile?.onboardingCompleted ? mainMenuKeyboard() : onboardingStartKeyboard()
     });
   });
 
   bot.callbackQuery("start_age_accept", async (ctx) => {
     await ctx.answerCallbackQuery("Возраст подтвержден");
     if (ctx.from?.id) {
-      confirmAdult(getUserProfile(ctx.from.id));
+      const profile = getUserProfile(ctx.from.id);
+      confirmAdult(profile);
       await syncTelegramUser(ctx.from);
       resetChatState(ctx.from.id);
+      await ctx.editMessageText(profile.onboardingCompleted ? startText(ctx.from.first_name) : onboardingStartText(ctx.from.first_name), {
+        parse_mode: "HTML",
+        reply_markup: profile.onboardingCompleted ? mainMenuKeyboard() : onboardingStartKeyboard()
+      });
     }
-    await ctx.editMessageText(startText(ctx.from.first_name), {
-      parse_mode: "HTML",
-      reply_markup: mainMenuKeyboard()
-    });
   });
 
   bot.command("menu", async (ctx) => {
+    const profile = ctx.from?.id ? getUserProfile(ctx.from.id) : null;
     if (ctx.from?.id) await syncTelegramUser(ctx.from);
-    await ctx.reply("Главное меню Rolka:", {
+    await ctx.reply(profile?.onboardingCompleted ? "Главное меню Rolka:" : "Сначала пройди короткое обучение — оно займет около минуты.", {
       parse_mode: "HTML",
-      reply_markup: mainMenuKeyboard()
+      reply_markup: profile?.onboardingCompleted ? mainMenuKeyboard() : onboardingStartKeyboard()
     });
   });
 
@@ -167,9 +238,10 @@ export function createBot() {
   });
 
   bot.command("help", async (ctx) => {
+    const profile = ctx.from?.id ? getUserProfile(ctx.from.id) : null;
     await ctx.reply(helpText(), {
       parse_mode: "HTML",
-      reply_markup: mainMenuKeyboard()
+      reply_markup: profile?.onboardingCompleted ? mainMenuKeyboard() : onboardingStartKeyboard()
     });
   });
 
@@ -194,9 +266,86 @@ export function createBot() {
   bot.callbackQuery("main_menu", async (ctx) => {
     await ctx.answerCallbackQuery();
     getChatState(ctx.from.id).awaiting = null;
-    await ctx.editMessageText(startText(ctx.from.first_name), {
+    const profile = getUserProfile(ctx.from.id);
+    await ctx.editMessageText(profile.onboardingCompleted ? startText(ctx.from.first_name) : onboardingStartText(ctx.from.first_name), {
       parse_mode: "HTML",
-      reply_markup: mainMenuKeyboard()
+      reply_markup: profile.onboardingCompleted ? mainMenuKeyboard() : onboardingStartKeyboard()
+    });
+  });
+
+  bot.callbackQuery("onboarding_start", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    resetChatState(ctx.from.id);
+    await ctx.editMessageText(onboardingGoalText(), {
+      parse_mode: "HTML",
+      reply_markup: onboardingGoalKeyboard()
+    });
+  });
+
+  bot.callbackQuery("onboarding_how", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(onboardingHowText(), {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("🎭 Начать обучение", "onboarding_start")
+    });
+  });
+
+  bot.callbackQuery(/^onboarding_goal:/, async (ctx) => {
+    await ctx.answerCallbackQuery("Сценарий выбран");
+    const goal = ctx.callbackQuery.data.replace("onboarding_goal:", "");
+    applyOnboardingGoal(getChatState(ctx.from.id), goal);
+    await ctx.editMessageText(onboardingCharacterText(), {
+      parse_mode: "HTML",
+      reply_markup: onboardingCharacterKeyboard()
+    });
+  });
+
+  bot.callbackQuery(/^onboarding_character:/, async (ctx) => {
+    await ctx.answerCallbackQuery("Персонаж выбран");
+    const id = ctx.callbackQuery.data.replace("onboarding_character:", "");
+    getChatState(ctx.from.id).aiCharacter = onboardingCharacters[id] ?? generatedAiCharacter;
+    await ctx.editMessageText(onboardingStyleText(), {
+      parse_mode: "HTML",
+      reply_markup: onboardingStyleKeyboard()
+    });
+  });
+
+  bot.callbackQuery("onboarding_character_generate", async (ctx) => {
+    await ctx.answerCallbackQuery("Персонаж подобран");
+    getChatState(ctx.from.id).aiCharacter = nextGeneratedCharacter(ctx.from.id);
+    await ctx.editMessageText(onboardingStyleText(), {
+      parse_mode: "HTML",
+      reply_markup: onboardingStyleKeyboard()
+    });
+  });
+
+  bot.callbackQuery(/^onboarding_style:/, async (ctx) => {
+    await ctx.answerCallbackQuery("Стиль выбран");
+    const style = ctx.callbackQuery.data.replace("onboarding_style:", "");
+    const state = getChatState(ctx.from.id);
+    state.mode = mapMode(style);
+    await ctx.editMessageText(onboardingFirstMessageText(state), {
+      parse_mode: "HTML",
+      reply_markup: onboardingFirstMessageKeyboard()
+    });
+  });
+
+  bot.callbackQuery("onboarding_write_self", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    getChatState(ctx.from.id).awaiting = null;
+    await ctx.editMessageText(onboardingWriteSelfText(), {
+      parse_mode: "HTML",
+      reply_markup: chatConfirmKeyboard()
+    });
+  });
+
+  bot.callbackQuery("onboarding_starter_scene", async (ctx) => {
+    await ctx.answerCallbackQuery("Сцена готова");
+    const state = getChatState(ctx.from.id);
+    state.context = state.aiCharacter?.starterScene ?? generatedAiCharacter.starterScene ?? undefined;
+    await ctx.editMessageText(onboardingStarterSceneText(state), {
+      parse_mode: "HTML",
+      reply_markup: chatConfirmKeyboard()
     });
   });
 
@@ -207,7 +356,7 @@ export function createBot() {
     if (previousMode) getChatState(ctx.from.id).mode = previousMode;
     await ctx.editMessageText(newChatText(), {
       parse_mode: "HTML",
-      reply_markup: chatContextKeyboard()
+      reply_markup: newChatKeyboard()
     });
   });
 
@@ -216,7 +365,7 @@ export function createBot() {
     getChatState(ctx.from.id).awaiting = null;
     await ctx.editMessageText(newChatText(), {
       parse_mode: "HTML",
-      reply_markup: chatContextKeyboard()
+      reply_markup: newChatKeyboard()
     });
   });
 
@@ -232,9 +381,9 @@ export function createBot() {
   bot.callbackQuery("chat_context_skip", async (ctx) => {
     await ctx.answerCallbackQuery();
     getChatState(ctx.from.id).awaiting = null;
-    await ctx.editMessageText(savedUserProfilesText(), {
+    await ctx.editMessageText(chatAiCharacterText(), {
       parse_mode: "HTML",
-      reply_markup: savedUserProfilesKeyboard(ctx.from.id)
+      reply_markup: chatAiCharacterKeyboard()
     });
   });
 
@@ -345,7 +494,8 @@ export function createBot() {
 
   bot.callbackQuery("chat_ai_character_generate", async (ctx) => {
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(aiGeneratedCharacterText(), {
+    const character = nextGeneratedCharacter(ctx.from.id);
+    await ctx.editMessageText(aiGeneratedCharacterText(character), {
       parse_mode: "HTML",
       reply_markup: aiGeneratedCharacterKeyboard()
     });
@@ -354,7 +504,7 @@ export function createBot() {
   bot.callbackQuery("chat_ai_character_accept_generated", async (ctx) => {
     await ctx.answerCallbackQuery("Персонаж выбран");
     const state = getChatState(ctx.from.id);
-    state.aiCharacter = generatedAiCharacter;
+    state.aiCharacter ??= generatedAiCharacter;
     state.awaiting = null;
     await ctx.editMessageText(aiCharacterPickedText(state.aiCharacter.name), {
       parse_mode: "HTML",
@@ -389,7 +539,7 @@ export function createBot() {
     const state = getChatState(ctx.from.id);
     state.mode = mapMode(mode);
     state.awaiting = null;
-    await ctx.editMessageText(chatConfirmText(state, mode), {
+    await ctx.editMessageText(chatConfirmText(state), {
       parse_mode: "HTML",
       reply_markup: chatConfirmKeyboard()
     });
@@ -407,15 +557,42 @@ export function createBot() {
       });
       return;
     }
+    const completedOnboardingNow = !profile.onboardingCompleted;
     profile.chatsStarted += 1;
+    profile.onboardingCompleted = true;
+    if (completedOnboardingNow) await markOnboardingCompleted(ctx.from.id);
     state.active = true;
     state.awaiting = null;
     state.mode ??= "CLASSIC";
     state.aiCharacter ??= generatedAiCharacter;
-    await ctx.editMessageText(chatReadyText(state), {
+    await ctx.editMessageText(chatReadyText(state, completedOnboardingNow), {
       parse_mode: "HTML",
       reply_markup: chatReadyKeyboard()
     });
+  });
+
+  bot.callbackQuery("stop_active_chat", async (ctx) => {
+    await ctx.answerCallbackQuery("Ролка остановлена");
+    const state = getChatState(ctx.from.id);
+    state.active = false;
+    state.awaiting = null;
+    await ctx.editMessageText(stopText(state), {
+      parse_mode: "HTML",
+      reply_markup: stoppedChatKeyboard()
+    });
+  });
+
+  bot.callbackQuery("memory_save", async (ctx) => {
+    await ctx.answerCallbackQuery("Память собрана");
+    const state = getChatState(ctx.from.id);
+    await ctx.editMessageText(contextText(state), {
+      parse_mode: "HTML",
+      reply_markup: chatReadyKeyboard()
+    });
+  });
+
+  bot.callbackQuery("continue_free", async (ctx) => {
+    await ctx.answerCallbackQuery("Продолжаем бесплатно");
   });
 
   bot.callbackQuery("characters", async (ctx) => {
@@ -548,7 +725,7 @@ export function createBot() {
       const state = getChatState(ctx.from.id);
       state.mode = "ADULT";
       state.awaiting = null;
-      await ctx.editMessageText(chatConfirmText(state, "18+ Adult"), {
+      await ctx.editMessageText(chatConfirmText(state), {
         parse_mode: "HTML",
         reply_markup: chatConfirmKeyboard()
       });
@@ -575,7 +752,7 @@ export function createBot() {
     const state = getChatState(ctx.from.id);
     state.mode = "ADULT";
     state.awaiting = null;
-    await ctx.editMessageText(chatConfirmText(state, "18+ Adult"), {
+    await ctx.editMessageText(chatConfirmText(state), {
       parse_mode: "HTML",
       reply_markup: chatConfirmKeyboard()
     });
@@ -745,19 +922,29 @@ export function createBot() {
   return bot;
 }
 
+const modeButtonLabels: Record<RpMode, string> = {
+  CLASSIC: "🎭 Обычная",
+  CINEMATIC: "🎬 Киношная",
+  DIALOGUE_FOCUS: "💬 Диалоги",
+  SLOW_BURN: "❤️ Медленная",
+  ADVENTURE_GM: "🧭 Приключение",
+  DARK_DRAMA: "🕯 Темная драма",
+  ADULT: "🔞 18+",
+  PHOTO_SCENE: "🖼 Фото сцены"
+};
+
+function modeButtonLabel(mode: RpMode) {
+  return modeButtonLabels[mode];
+}
+
 export function mainMenuKeyboard() {
   return new InlineKeyboard()
-    .text("🎭 Новый чат", "new_chat")
+    .text("🎭 Начать ролку", "new_chat")
+    .row()
+    .text("💬 Мои ролки", "my_chats")
     .text("👤 Персонажи", "characters")
     .row()
-    .text("💬 Мои чаты", "my_chats")
-    .text("⚙️ RP-режимы", "rp_modes")
-    .row()
-    .text("⭐ Подписка", "subscription")
-    .text("🔞 18+ доступ", "adult_gate")
-    .row()
-    .text("📄 Правила", "rules")
-    .text("👤 Профиль", "profile");
+    .text("⭐ Plus / Pro", "subscription");
 }
 
 function backKeyboard() {
@@ -768,18 +955,71 @@ function awaitingInputKeyboard(backCallback: string) {
   return new InlineKeyboard().text("← Назад", backCallback).text("← Главное меню", "main_menu");
 }
 
-function chatContextKeyboard() {
+function onboardingStartKeyboard() {
   return new InlineKeyboard()
-    .text("🧠 У меня есть старый контекст", "chat_context_have")
+    .text("🎭 Начать первую ролку", "onboarding_start")
     .row()
-    .text("Пропустить", "chat_context_skip")
+    .text("👤 Выбрать готового персонажа", "onboarding_goal:custom")
+    .row()
+    .text("❔ Как это работает", "onboarding_how");
+}
+
+function onboardingGoalKeyboard() {
+  return new InlineKeyboard()
+    .text("❤️ Медленное сближение", "onboarding_goal:slow")
+    .row()
+    .text("🕯 Темная драма", "onboarding_goal:dark")
+    .row()
+    .text("🧭 Приключение", "onboarding_goal:adventure")
+    .row()
+    .text("✍️ Свой персонаж", "onboarding_goal:custom");
+}
+
+function onboardingCharacterKeyboard() {
+  return new InlineKeyboard()
+    .text("🕶 Таинственный незнакомец", "onboarding_character:stranger")
+    .row()
+    .text("🤝 Бывший союзник", "onboarding_character:ally")
+    .row()
+    .text("⚜️ Опасный покровитель", "onboarding_character:patron")
+    .row()
+    .text("🧭 Мастер приключения", "onboarding_character:gm")
+    .row()
+    .text("✨ Сгенерировать под меня", "onboarding_character_generate");
+}
+
+function onboardingStyleKeyboard() {
+  return new InlineKeyboard()
+    .text(modeButtonLabel("CLASSIC"), "onboarding_style:classic")
+    .row()
+    .text(modeButtonLabel("SLOW_BURN"), "onboarding_style:slow")
+    .row()
+    .text(modeButtonLabel("DARK_DRAMA"), "onboarding_style:dark");
+}
+
+function onboardingFirstMessageKeyboard() {
+  return new InlineKeyboard()
+    .text("✍️ Написать самому", "onboarding_write_self")
+    .row()
+    .text("✨ Дай стартовую сцену", "onboarding_starter_scene");
+}
+
+function newChatKeyboard() {
+  return new InlineKeyboard()
+    .text("👤 Мой персонаж", "chat_ai_character_saved")
+    .text("✨ Придумай за меня", "chat_ai_character_generate")
+    .row()
+    .text("✍️ Написать самому", "chat_ai_character_custom")
+    .row()
+    .text("🧠 Продолжить старую ролку", "chat_context_have")
     .text("← Главное меню", "main_menu");
 }
 
 function chatContextAwaitingKeyboard() {
   return new InlineKeyboard()
-    .text("Пропустить контекст", "chat_context_skip")
+    .text("Дальше к персонажу", "chat_ai_character")
     .row()
+    .text("Без старого сюжета", "chat_context_skip")
     .text("← Главное меню", "main_menu");
 }
 
@@ -818,12 +1058,12 @@ function userProfileSavedKeyboard() {
 
 function chatAiCharacterKeyboard() {
   return new InlineKeyboard()
-    .text("👤 Мои персонажи", "chat_ai_character_saved")
-    .text("✍️ Написать с нуля", "chat_ai_character_custom")
+    .text("👤 Мой персонаж", "chat_ai_character_saved")
+    .text("✨ Придумай за меня", "chat_ai_character_generate")
     .row()
-    .text("✨ Пусть AI предложит", "chat_ai_character_generate")
+    .text("✍️ Написать самому", "chat_ai_character_custom")
     .row()
-    .text("← Назад к персонажу", "chat_user_profile");
+    .text("← Назад", "new_chat");
 }
 
 function aiCharacterInputKeyboard() {
@@ -889,14 +1129,17 @@ function aiGeneratedCharacterKeyboard() {
 
 function chatModeStepKeyboard() {
   return new InlineKeyboard()
-    .text("Classic", "chat_mode:Classic RP")
-    .text("Cinematic", "chat_mode:Cinematic")
+    .text(modeButtonLabel("CLASSIC"), "chat_mode:Classic RP")
+    .text(modeButtonLabel("CINEMATIC"), "chat_mode:Cinematic")
     .row()
-    .text("Dialogue", "chat_mode:Dialogue Focus")
-    .text("Slow Burn", "chat_mode:Slow Burn")
+    .text(modeButtonLabel("DIALOGUE_FOCUS"), "chat_mode:Dialogue Focus")
+    .text(modeButtonLabel("SLOW_BURN"), "chat_mode:Slow Burn")
     .row()
-    .text("Adventure GM", "chat_mode:Adventure GM")
-    .text("18+ Adult", "adult_gate_chat")
+    .text(modeButtonLabel("ADVENTURE_GM"), "chat_mode:Adventure GM")
+    .text(modeButtonLabel("DARK_DRAMA"), "chat_mode:Dark Drama")
+    .row()
+    .text(modeButtonLabel("ADULT"), "adult_gate_chat")
+    .text(modeButtonLabel("PHOTO_SCENE"), "chat_mode:Photo Scene")
     .row()
     .text("← Назад к персонажу", "chat_ai_character");
 }
@@ -913,12 +1156,42 @@ function chatConfirmKeyboard() {
 
 function chatReadyKeyboard() {
   return new InlineKeyboard()
-    .text("🧠 Экспорт контекста", "context_export")
-    .text("🖼 Фото сцены", "image_mode")
+    .text("⏹ Закончить", "stop_active_chat")
+    .text("🧠 Сохранить память", "memory_save")
     .row()
     .text("💾 Сохранить и выйти", "save_and_exit")
+    .text("🖼 Сделать сцену", "image_mode")
+    .row()
     .text("⭐ Снять лимиты", "subscription")
     .row()
+    .text("← Главное меню", "main_menu");
+}
+
+function valueCheckpointKeyboard() {
+  return new InlineKeyboard()
+    .text("🧠 Сохранить память", "memory_save")
+    .row()
+    .text("▶️ Продолжить бесплатно", "continue_free")
+    .row()
+    .text("⭐ Что дает Plus", "subscription");
+}
+
+function nonAdultModeRedirectKeyboard() {
+  return new InlineKeyboard()
+    .text("🎭 Продолжить без 18+", "continue_free")
+    .row()
+    .text("🔞 Перейти в 18+ режим", "adult_gate_chat")
+    .row()
+    .text("🎛 Сменить стиль", "chat_mode_step")
+    .text("← Главное меню", "main_menu");
+}
+
+function stoppedChatKeyboard() {
+  return new InlineKeyboard()
+    .text("🎭 Новая ролка", "new_chat")
+    .text("🧠 Память", "context_export")
+    .row()
+    .text("⭐ Plus / Pro", "subscription")
     .text("← Главное меню", "main_menu");
 }
 
@@ -944,12 +1217,13 @@ function modeSelectedKeyboard() {
 function chatsKeyboard(userId: number) {
   const keyboard = new InlineKeyboard();
   const chats = getUserProfile(userId).savedChats;
+  keyboard.text("🎭 Начать ролку", "new_chat").row();
   chats.slice(0, 8).forEach((chat, index) => {
     keyboard.text(chat.title, `saved_chat:${chat.id}`);
     if (index % 2 === 1) keyboard.row();
   });
   if (chats.length) keyboard.row().text("Удалить чат", "delete_chat_menu").row();
-  return keyboard.text("← Главное меню", "main_menu");
+  return keyboard.text("⭐ Больше ролок в Plus", "subscription").text("← Главное меню", "main_menu");
 }
 
 function deleteChatKeyboard(userId: number) {
@@ -963,17 +1237,17 @@ function deleteChatKeyboard(userId: number) {
 
 function modesKeyboard() {
   return new InlineKeyboard()
-    .text("Classic RP", "mode:classic")
-    .text("Cinematic", "mode:cinematic")
+    .text(modeButtonLabel("CLASSIC"), "mode:classic")
+    .text(modeButtonLabel("CINEMATIC"), "mode:cinematic")
     .row()
-    .text("Dialogue Focus", "mode:dialogue")
-    .text("Slow Burn", "mode:slow")
+    .text(modeButtonLabel("DIALOGUE_FOCUS"), "mode:dialogue")
+    .text(modeButtonLabel("SLOW_BURN"), "mode:slow")
     .row()
-    .text("Adventure GM", "mode:gm")
-    .text("Dark Drama", "mode:drama")
+    .text(modeButtonLabel("ADVENTURE_GM"), "mode:gm")
+    .text(modeButtonLabel("DARK_DRAMA"), "mode:drama")
     .row()
-    .text("18+ Adult", "adult_gate")
-    .text("Photo Scene", "image_mode")
+    .text(modeButtonLabel("ADULT"), "adult_gate")
+    .text(modeButtonLabel("PHOTO_SCENE"), "mode:photo")
     .row()
     .text("← Главное меню", "main_menu");
 }
@@ -1063,18 +1337,104 @@ function startText(firstName?: string) {
   return [
     `👋 <b>${escapeHtml(firstName ?? "Игрок")}, добро пожаловать в Rolka.</b>`,
     "",
-    "Это RP-бот для переписок с персонажами.",
+    "Здесь можно быстро начать ролку с персонажем: выбрать стиль, отправить первое сообщение и играть прямо в Telegram.",
     "",
-    "Здесь можно:",
-    "• создавать и хранить своих персонажей;",
-    "• запускать новые RP-чаты;",
-    "• выбирать стиль roleplay;",
-    "• переносить контекст старой переписки в новый чат;",
-    "• сохранять переписки и возвращаться к ним;",
-    "• использовать 18+ режим после подтверждения возраста;",
-    "• открыть Plus/Pro для снятия лимитов.",
+    "Если не знаешь, с чего начать, жми <b>«Начать ролку»</b> — бот проведет по шагам.",
     "",
-    "<b>Выбери действие ниже.</b>"
+    "Персонажей можно придумать самому, взять сохраненного или попросить Rolka предложить вариант. Сохраненные переписки доступны в <b>«Мои ролки»</b>."
+  ].join("\n");
+}
+
+function onboardingStartText(firstName?: string) {
+  return [
+    `👋 <b>${escapeHtml(firstName ?? "Игрок")}, добро пожаловать в Rolka.</b>`,
+    "",
+    "Сейчас ты проходишь <b>короткое обучение</b>, а не смотришь весь функционал бота.",
+    "",
+    "За 1 минуту начнем первую ролку: выберем персонажа, стиль и отправим первое сообщение.",
+    "",
+    "После первой сцены откроется обычное меню Rolka со всеми режимами и функциями."
+  ].join("\n");
+}
+
+function onboardingHowText() {
+  return [
+    "❔ <b>Как работает обучение</b>",
+    "",
+    "1. Выберешь быстрый сценарий.",
+    "2. Возьмешь готового персонажа или попросишь Rolka придумать его.",
+    "3. Выберешь один из 3 простых стилей.",
+    "4. Начнешь первую сцену.",
+    "",
+    "Это сделано специально: новичку не нужно сразу разбираться во всех кнопках. После обучения откроется обычный бот."
+  ].join("\n");
+}
+
+function onboardingGoalText() {
+  return [
+    "🎓 <b>Обучение: шаг 1 из 4</b>",
+    "",
+    "<b>Какую первую сцену хочешь?</b>",
+    "",
+    "Выбери настроение. Это не ограничение навсегда, а быстрый старт, чтобы не упереться в пустой экран."
+  ].join("\n");
+}
+
+function onboardingCharacterText() {
+  return [
+    "🎓 <b>Обучение: шаг 2 из 4</b>",
+    "",
+    "<b>Выбери персонажа для первой сцены.</b>",
+    "",
+    "Это готовые шаблоны для быстрого старта. Позже сможешь создавать своих персонажей и видеть все режимы."
+  ].join("\n");
+}
+
+function onboardingStyleText() {
+  return [
+    "🎓 <b>Обучение: шаг 3 из 4</b>",
+    "",
+    "<b>Выбери стиль первой ролки.</b>",
+    "",
+    "В обучении показываем только 3 понятных варианта. После первой сцены откроются все стили: диалоги, приключение, 18+, фото сцены и другие."
+  ].join("\n");
+}
+
+function onboardingFirstMessageText(state: ChatDraft) {
+  return [
+    "🎓 <b>Обучение: шаг 4 из 4</b>",
+    "",
+    `<b>Персонаж:</b> ${escapeHtml(state.aiCharacter?.name ?? generatedAiCharacter.name)}`,
+    `<b>Стиль:</b> ${escapeHtml(modeButtonLabel(state.mode ?? "CLASSIC"))}`,
+    "",
+    "Теперь осталось начать сцену.",
+    "",
+    "Можно написать самому, например:",
+    "<i>Я захожу в таверну и замечаю тебя у окна.</i>",
+    "",
+    "Или попроси Rolka дать стартовую сцену."
+  ].join("\n");
+}
+
+function onboardingWriteSelfText() {
+  return [
+    "✅ <b>Обучение почти закончено.</b>",
+    "",
+    "Нажми <b>«Начать чат»</b>, а затем отправь свое первое сообщение персонажу.",
+    "",
+    "После старта откроется обычное меню Rolka со всеми функциями."
+  ].join("\n");
+}
+
+function onboardingStarterSceneText(state: ChatDraft) {
+  return [
+    "✅ <b>Стартовая сцена готова.</b>",
+    "",
+    escapeHtml(state.context ?? generatedAiCharacter.starterScene ?? "Сцена готова к началу."),
+    "",
+    "Нажми <b>«Начать чат»</b>, а потом ответь персонажу любым сообщением.",
+    "",
+    "После старта обучение завершится и откроется обычный бот."
   ].join("\n");
 }
 
@@ -1082,50 +1442,50 @@ function helpText() {
   return [
     "<b>Как пользоваться Rolka</b>",
     "",
-    "1. Создай персонажа или возьми шаблон анкеты.",
-    "2. Выбери RP-режим.",
-    "3. Создай чат и начни сцену.",
-    "4. Если AI начал забывать детали, нажми «Контекст» и перенеси snapshot в новый чат.",
+    "1. Нажми «Начать ролку».",
+    "2. Выбери, кто будет отвечать.",
+    "3. Выбери стиль ролки.",
+    "4. Нажми «Начать» и отправь первое сообщение.",
     "",
-    "Free: 3 персонажа, 3 чата, 15 сообщений в 18+ режиме.",
-    "Plus/Pro снимают основные ограничения."
+    "Если продолжаешь старую переписку, выбери «Продолжить старую ролку» и вставь, что уже произошло.",
+    "",
+    "Free: 3 персонажа, 3 ролки, 15 сообщений в 18+ режиме.",
+    "Plus/Pro дают больше ролок, длинную память, фото сцен и меньше лимитов."
   ].join("\n");
 }
 
 function newChatText() {
   return [
-    "🎭 <b>Новый RP-чат</b>",
+    "🎭 <b>Начать ролку</b>",
     "",
-    "<b>Шаг 1 из 5 — контекст.</b>",
+    "<b>Шаг 1 из 3 — кто будет отвечать?</b>",
     "",
-    "Если ты переносишь старую переписку, сначала дай контекст: что уже произошло, кто с кем в каких отношениях, где сцена остановилась и какие факты AI не должен забыть.",
+    "Выбери персонажа для Rolka. Можно взять готового, написать своего или попросить бота придумать вариант.",
     "",
-    "Если начинаешь с нуля, просто пропусти этот шаг.",
-    "",
-    "<i>Приоритет:</i> контекст → твой персонаж → персонаж AI → режим → старт."
+    "Если ты продолжаешь старую переписку, нажми <b>«Продолжить старую ролку»</b> и вставь кратко, что уже произошло."
   ].join("\n");
 }
 
 function chatContextHaveText() {
   return [
-    "🧠 <b>Контекст старой переписки</b>",
+    "🧠 <b>Продолжить старую ролку</b>",
     "",
-    "Отправь его следующим сообщением максимально подробно.",
+    "Отправь одним сообщением, что уже произошло в прошлой переписке.",
     "",
-    "<b>Что лучше включить:</b>",
-    "• краткое содержание сюжета;",
-    "• текущую сцену и место;",
-    "• отношения персонажей;",
-    "• важные факты и обещания;",
-    "• стиль переписки, который нужно сохранить.",
+    "<b>Лучше всего указать:</b>",
+    "• кто с кем общается;",
+    "• где сейчас сцена;",
+    "• что уже случилось;",
+    "• какие отношения и обещания важны;",
+    "• какой тон переписки сохранить.",
     "",
-    "Отправь контекст одним сообщением. После сохранения появится кнопка продолжения."
+    "После этого выберешь персонажа и стиль ролки."
   ].join("\n");
 }
 
 function chatUserProfileText(state?: ChatDraft) {
   return [
-    "👤 <b>Шаг 2 из 5 — выбор персонажа.</b>",
+    "📝 <b>Твоя роль в сцене</b>",
     "",
     state?.userProfileName ? `Сейчас выбрано: <b>${escapeHtml(state.userProfileName)}</b>` : "Выбери персонажа из списка или создай нового.",
     "",
@@ -1173,16 +1533,11 @@ function userProfileTemplateText() {
 
 function chatAiCharacterText() {
   return [
-    "👤 <b>Шаг 3 из 5 — персонаж для AI.</b>",
+    "👤 <b>Шаг 1 из 3 — кто будет отвечать?</b>",
     "",
-    "Теперь выбери, кем будет отвечать нейронка.",
+    "Выбери персонажа для Rolka.",
     "",
-    "<b>Варианты:</b>",
-    "• взять одного из твоих сохраненных персонажей;",
-    "• написать нового персонажа с нуля;",
-    "• попросить AI предложить персонажа под твою идею.",
-    "",
-    "Лучше всего работает подробная карточка: имя, возраст, внешность, характер, стиль речи, тема, границы и стартовая сцена."
+    "Можно взять сохраненного, написать своего или попросить бота придумать персонажа под сцену."
   ].join("\n");
 }
 
@@ -1218,56 +1573,50 @@ function aiCharacterTemplateText() {
   ].join("\n");
 }
 
-function aiGeneratedCharacterText() {
+function aiGeneratedCharacterText(character: PromptCharacter) {
   return [
     "✨ <b>AI предложил персонажа</b>",
     "",
-    "<b>Имя:</b> Элиан Вейр",
-    "<b>Возраст:</b> 27",
-    "<b>Роль:</b> харизматичный незнакомец с собственной тайной",
-    "<b>Характер:</b> спокойный, внимательный, говорит мало, но точно; умеет давить паузой.",
-    "<b>Стиль речи:</b> мягкая ирония, короткие фразы, без канцелярита.",
-    "<b>Динамика:</b> медленное сближение, напряжение, секреты, выбор доверять или нет.",
+    `<b>Имя:</b> ${escapeHtml(character.name)}`,
+    `<b>Возраст:</b> ${character.age ?? 18}`,
+    `<b>Роль:</b> ${escapeHtml(character.description)}`,
+    character.personality ? `<b>Характер:</b> ${escapeHtml(character.personality)}` : "",
+    character.speechStyle ? `<b>Стиль речи:</b> ${escapeHtml(character.speechStyle)}` : "",
+    character.starterScene ? `<b>Старт:</b> ${escapeHtml(character.starterScene)}` : "",
     "",
     "Можно взять этого персонажа, запросить другой вариант или написать своего."
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function aiCharacterPickedText(name: string) {
   return [
     `✅ <b>Персонаж AI выбран:</b> ${escapeHtml(name)}`,
     "",
-    "Теперь выбери режим RP. После этого можно будет начать реальную переписку."
+    "Теперь выбери стиль ролки. После этого можно будет начать переписку."
   ].join("\n");
 }
 
 function chatModeStepText() {
   return [
-    "⚙️ <b>Шаг 4 из 5 — режим RP.</b>",
+    "🎛 <b>Шаг 2 из 3 — стиль ролки.</b>",
     "",
-    "Выбери стиль, в котором AI будет вести переписку.",
+    "Выбери, как Rolka должна отвечать. Все стили доступны сразу.",
     "",
-    "<b>Совет:</b>",
-    "• для обычной игры — Classic;",
-    "• для атмосферы — Cinematic;",
-    "• для коротких ответов — Dialogue;",
-    "• для отношений — Slow Burn;",
-    "• для сюжета и NPC — Adventure GM."
+    "Если не уверен, бери <b>🎭 Обычная</b>."
   ].join("\n");
 }
 
-function chatConfirmText(state: ChatDraft, modeLabel?: string) {
+function chatConfirmText(state: ChatDraft) {
   return [
-    "✅ <b>Шаг 5 из 5 — проверка перед стартом.</b>",
+    "✅ <b>Шаг 3 из 3 — все готово.</b>",
     "",
-    `<b>Контекст:</b> ${state.context ? "добавлен" : "нет"}`,
-    `<b>Твоя анкета:</b> ${state.userProfileName ? escapeHtml(state.userProfileName) : state.userProfile ? "добавлена" : "нет"}`,
-    `<b>Персонаж AI:</b> ${escapeHtml(state.aiCharacter?.name ?? generatedAiCharacter.name)}`,
-    `<b>Режим:</b> ${escapeHtml(modeLabel ?? state.mode ?? "CLASSIC")}`,
+    `<b>Персонаж:</b> ${escapeHtml(state.aiCharacter?.name ?? generatedAiCharacter.name)}`,
+    `<b>Стиль:</b> ${escapeHtml(modeButtonLabel(state.mode ?? "CLASSIC"))}`,
+    state.context ? "<b>Старая ролка:</b> добавлена" : "<b>Старая ролка:</b> с нуля",
     "",
-    "После старта Rolka соберет системный prompt: safety → стиль → режим → персонажи → контекст → последние сообщения.",
+    "Нажми <b>«Начать чат»</b>, а потом просто отправь первое сообщение персонажу.",
     "",
-    "Нажми «Начать чат», если все готово."
+    "Вернуться и поменять стиль или персонажа можно кнопками ниже."
   ].join("\n");
 }
 
@@ -1301,28 +1650,52 @@ function aiCharacterSavedText(state: ChatDraft) {
   ].join("\n");
 }
 
-function chatReadyText(state: ChatDraft) {
+function chatReadyText(state: ChatDraft, completedOnboardingNow = false) {
   return [
-    "🎭 <b>Чат готов.</b>",
+    "🎭 <b>Ролка началась.</b>",
     "",
-    `<b>Режим:</b> ${state.mode ?? "CLASSIC"}`,
-    `<b>Персонаж AI:</b> ${escapeHtml(state.aiCharacter?.name ?? generatedAiCharacter.name)}`,
-    state.context ? "<b>Контекст:</b> добавлен" : "<b>Контекст:</b> нет",
-    state.userProfile ? "<b>Твоя анкета:</b> добавлена" : "<b>Твоя анкета:</b> нет",
+    completedOnboardingNow ? "🎓 <b>Обучение завершено.</b> Теперь в главном меню открыт обычный бот со всеми функциями." : "",
+    completedOnboardingNow ? "" : "",
+    `<b>Стиль:</b> ${escapeHtml(modeButtonLabel(state.mode ?? "CLASSIC"))}`,
+    `<b>Персонаж:</b> ${escapeHtml(state.aiCharacter?.name ?? generatedAiCharacter.name)}`,
+    state.context ? "<b>Старая ролка:</b> учтена" : "<b>Старая ролка:</b> с нуля",
     "",
-    "Теперь просто отправь сообщение в этот чат, и бот ответит через AI.",
+    "Теперь напиши первое сообщение, и персонаж ответит.",
     "",
-    "Чтобы остановить RP-чат, напиши <code>/stop</code>."
+    "Кнопки ниже помогут закончить ролку, сохранить память, сделать фото сцены или снять лимиты."
+  ].filter((line) => line !== null).join("\n");
+}
+
+function valueCheckpointText() {
+  return [
+    "🧠 <b>Сцена уже начала складываться.</b>",
+    "",
+    "Rolka уже держит персонажа, настроение, отношения и текущий момент.",
+    "",
+    "Можно сохранить память, чтобы потом продолжить без пересказа с нуля. Free сохранит кратко, Plus откроет более полную память."
+  ].join("\n");
+}
+
+function nonAdultModeRedirectText(state: ChatDraft) {
+  const characterName = state.aiCharacter?.name ?? generatedAiCharacter.name;
+  return [
+    `${escapeHtml(characterName)} на секунду задерживает движение, будто мягко ставит сцене границу.`,
+    "",
+    "— Давай не будем торопить это здесь. Останемся в напряжении, разговоре и том, что происходит между нами сейчас.",
+    "",
+    "Сцена может продолжиться без explicit-описаний: через флирт, паузу, эмоции, конфликт или смену обстоятельств.",
+    "",
+    "Если хочешь именно 18+ продолжение, выбери отдельный режим ниже."
   ].join("\n");
 }
 
 function stopText(state: ChatDraft) {
   return [
-    "⏹ <b>RP-чат остановлен.</b>",
+    "⏹ <b>Ролка остановлена.</b>",
     "",
-    `Сообщений в локальной памяти: <b>${state.messages.length}</b>`,
+    `Сообщений в памяти: <b>${state.messages.length}</b>`,
     "",
-    "Можно экспортировать контекст, снять лимиты или начать новый чат."
+    "Можно сохранить память, начать новую ролку или снять лимиты."
   ].join("\n");
 }
 
@@ -1426,7 +1799,7 @@ function chatsText(profile: UserRuntimeProfile) {
     ].join("\n");
   }
   return [
-    "💬 <b>Мои чаты</b>",
+    "💬 <b>Мои ролки</b>",
     "",
     `Сохранено чатов: <b>${profile.savedChats.length}</b>`,
     "",
@@ -1496,43 +1869,46 @@ function contextText(state?: ChatDraft) {
   }
 
   return [
-    "🧠 <b>Экспорт контекста</b>",
+    "🧠 <b>Память ролки</b>",
     "",
-    "Если AI начал забывать детали, Rolka делает snapshot переписки:",
-    "• полный текст диалога;",
-    "• краткая выжимка;",
-    "• факты персонажей;",
-    "• отношения и текущая сцена;",
-    "• готовый prompt для нового чата.",
+    "Если персонаж начал забывать детали, сохрани память и вставь ее при новой ролке:",
+    "• что уже произошло;",
+    "• кто с кем в каких отношениях;",
+    "• важные факты;",
+    "• где остановилась сцена;",
+    "• стиль переписки.",
     "",
-    "Потом ты создаешь новый чат и отправляешь туда персонажа + контекст."
+    "Потом нажми «Начать ролку» → «Продолжить старую ролку»."
   ].join("\n");
 }
 
 function modesText() {
   return [
-    "⚙️ <b>RP-режимы</b>",
+    "🎛 <b>Стили ролки</b>",
     "",
-    "<b>Classic RP</b> — обычная ролевая переписка.",
-    "<b>Cinematic</b> — больше атмосферы, сцен и деталей.",
-    "<b>Dialogue Focus</b> — короткие живые реплики.",
-    "<b>Slow Burn</b> — медленное развитие отношений/сюжета.",
-    "<b>Adventure GM</b> — AI ведет мир, NPC и последствия.",
-    "<b>Dark Drama</b> — напряженные взрослые темы без запрещенного контента.",
-    "<b>18+ Adult</b> — только после подтверждения 18+.",
-    "<b>Photo Scene</b> — генерация картинки сцены."
+    "<b>🎭 Обычная</b> — универсальная ролка.",
+    "<b>🎬 Киношная</b> — больше атмосферы и деталей сцены.",
+    "<b>💬 Диалоги</b> — короткие живые реплики.",
+    "<b>❤️ Медленная</b> — постепенные отношения и сюжет.",
+    "<b>🧭 Приключение</b> — мир, NPC, выборы и последствия.",
+    "<b>🕯 Темная драма</b> — напряженные взрослые темы в рамках правил.",
+    "<b>🔞 18+</b> — только после подтверждения возраста.",
+    "<b>🖼 Фото сцены</b> — описание сцены для картинки."
   ].join("\n");
 }
 
 function modeSelectedText(mode: RpMode) {
-  return `✅ <b>Режим выбран:</b> ${escapeHtml(mode)}\n\nТеперь можно создать чат: выбранный режим сохранится в черновик.`;
+  return `✅ <b>Стиль выбран:</b> ${escapeHtml(modeButtonLabel(mode))}\n\nТеперь можно начать ролку: этот стиль сохранится для следующего чата.`;
 }
 
 function imageText() {
   return [
-    "🖼 <b>Фото / сцены</b>",
+    "🖼 <b>Фото сцены</b>",
     "",
-    "Эта функция находится на стадии разработки и скоро будет доступна."
+    "Rolka возьмет персонажа и текущую сцену, а потом подготовит описание для изображения.",
+    "",
+    "<b>Free:</b> ограниченное количество фото.",
+    "<b>Plus/Pro:</b> больше фото, лучше качество и меньше ожидания."
   ].join("\n");
 }
 
@@ -1590,36 +1966,36 @@ function adultChatText() {
 
 function subscriptionText() {
   return [
-    "⭐ <b>Подписка Rolka</b>",
+    "⭐ <b>Plus / Pro</b>",
     "",
     "<b>Free</b>",
     "• 3 персонажа",
-    "• 3 чата",
-    "• нельзя удалять чаты",
+    "• 3 ролки",
+    "• базовая память",
     "• 15 сообщений в 18+ режиме",
     "",
     "<b>Plus</b>",
-    "• безлимит персонажей и чатов",
-    "• удаление/архив чатов",
-    "• больше 18+ сообщений",
-    "• полный экспорт контекста",
+    "• больше ролок и персонажей",
+    "• длинная память переписки",
+    "• больше 18+ сообщений без Free-упора",
+    "• больше фото сцен",
     "",
     "<b>Pro</b>",
-    "• премиум модели",
-    "• priority queue",
-    "• long memory",
-    "• lorebook",
+    "• лучшие модели",
+    "• приоритетные ответы",
+    "• максимальная память",
+    "• lorebook для сложных историй",
     "• больше генераций фото"
   ].join("\n");
 }
 
 function chatLimitText(profile: UserRuntimeProfile) {
   return [
-    "⭐ <b>Лимит чатов Free исчерпан.</b>",
+    "⭐ <b>Лимит ролок Free закончился.</b>",
     "",
-    `Создано чатов в текущей сессии: <b>${profile.chatsStarted}/3</b>.`,
+    `Создано ролок в текущей сессии: <b>${profile.chatsStarted}/3</b>.`,
     "",
-    "В Free доступно 3 чата, удаление не помогает обходить лимит. Для новых чатов нужен Plus или Pro."
+    "Plus/Pro дают больше ролок, длинную память и удобное продолжение историй."
   ].join("\n");
 }
 
@@ -1717,6 +2093,8 @@ async function syncTelegramUser(from: TelegramFrom) {
   const profile = getUserProfile(from.id);
   profile.isAdmin = user.isAdmin;
   profile.plan = user.isAdmin ? "PRO" : await getActivePlan(user.id);
+  profile.onboardingCompleted = user.onboardingCompleted;
+  profile.onboardingMessagesShown = Boolean(user.valueCheckpointShownAt);
   return user;
 }
 
@@ -1745,6 +2123,21 @@ async function getActivePlan(userId: string): Promise<Plan> {
     orderBy: { createdAt: "desc" }
   });
   return subscription?.plan ?? "FREE";
+}
+
+async function markOnboardingCompleted(telegramUserId: number) {
+  const completedAt = new Date();
+  await prisma.user.updateMany({
+    where: { telegramId: String(telegramUserId), onboardingCompleted: false },
+    data: { onboardingCompleted: true, onboardingCompletedAt: completedAt }
+  });
+}
+
+async function markValueCheckpointShown(telegramUserId: number) {
+  await prisma.user.updateMany({
+    where: { telegramId: String(telegramUserId), valueCheckpointShownAt: null },
+    data: { valueCheckpointShownAt: new Date() }
+  });
 }
 
 async function recordSuccessfulPayment(telegramUserId: number, plan: Exclude<Plan, "FREE">, chargeId: string, payload: string) {
@@ -2015,6 +2408,9 @@ function getUserProfile(userId: number): UserRuntimeProfile {
     plan: isAdmin ? "PRO" : "FREE",
     isAdmin,
     registeredAt: new Date(),
+    onboardingCompleted: false,
+    onboardingMessagesShown: false,
+    generatedCharacterVariantIndex: 0,
     characters: [],
     savedChats: [],
     chatsStarted: 0,
@@ -2060,6 +2456,40 @@ function formatDateTime(date: Date) {
     hour: "2-digit",
     minute: "2-digit"
   }).format(date);
+}
+
+function nextGeneratedCharacter(userId: number) {
+  const profile = getUserProfile(userId);
+  const character = generatedAiCharacterVariants[profile.generatedCharacterVariantIndex % generatedAiCharacterVariants.length];
+  profile.generatedCharacterVariantIndex += 1;
+  getChatState(userId).aiCharacter = character;
+  return character;
+}
+
+function applyOnboardingGoal(state: ChatDraft, goal: string) {
+  state.awaiting = null;
+  state.active = false;
+  if (goal === "slow") {
+    state.mode = "SLOW_BURN";
+    state.aiCharacter = onboardingCharacters.ally;
+    state.context = "Первая сцена строится вокруг медленного сближения, недосказанности и маленьких шагов доверия.";
+    return;
+  }
+  if (goal === "dark") {
+    state.mode = "DARK_DRAMA";
+    state.aiCharacter = onboardingCharacters.patron;
+    state.context = "Первая сцена строится вокруг напряжения, тайны и сложного выбора, но остается в рамках правил.";
+    return;
+  }
+  if (goal === "adventure") {
+    state.mode = "ADVENTURE_GM";
+    state.aiCharacter = onboardingCharacters.gm;
+    state.context = "Первая сцена строится вокруг приключения: локация, улика, выбор и последствия.";
+    return;
+  }
+  state.mode = "CLASSIC";
+  state.aiCharacter = generatedAiCharacter;
+  state.context = undefined;
 }
 
 function confirmAdult(profile: UserRuntimeProfile) {
@@ -2109,6 +2539,14 @@ async function handleActiveChatMessage(
     await reply(`Сообщение заблокировано safety-фильтром: ${safety.reason}`, chatReadyKeyboard());
     return;
   }
+  const adultIntent = detectAdultIntentOutsideAdultMode(content, state.mode ?? "CLASSIC");
+  if (!adultIntent.ok) {
+    const redirectText = nonAdultModeRedirectText(state);
+    state.messages.push({ role: "user", content });
+    state.messages.push({ role: "assistant", content: redirectText });
+    await reply(redirectText, nonAdultModeRedirectKeyboard());
+    return;
+  }
   if (state.mode === "ADULT" && profile.plan === "FREE" && profile.adultMessages >= freeAdultMessageLimit()) {
     await reply(adultLimitText(profile), subscriptionKeyboard());
     return;
@@ -2131,6 +2569,14 @@ async function handleActiveChatMessage(
     const answer = clampTelegramText(response.content || "Пустой ответ от модели. Попробуй отправить сообщение еще раз.");
     state.messages.push({ role: "assistant", content: answer });
     if (state.mode === "ADULT") profile.adultMessages += 1;
+    const shouldShowCheckpoint =
+      profile.plan === "FREE" && !profile.onboardingMessagesShown && state.messages.length >= 6;
+    if (shouldShowCheckpoint) {
+      profile.onboardingMessagesShown = true;
+      await markValueCheckpointShown(userId);
+      await reply(`${answer}\n\n${valueCheckpointText()}`, valueCheckpointKeyboard());
+      return;
+    }
     await reply(answer, chatReadyKeyboard());
   } catch (error) {
     console.error("AI chat failed", { chatId, error });

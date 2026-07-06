@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { validateAdultCharacters, validateAdultGate, validateSafetyText, containsAiTemplateLanguage } from "./safety";
+import {
+  containsAiTemplateLanguage,
+  detectAdultIntentOutsideAdultMode,
+  validateAdultCharacters,
+  validateAdultGate,
+  validateSafetyText
+} from "./safety";
 
 describe("safety", () => {
   it("requires age and legal acceptance for adult mode", () => {
@@ -23,6 +29,11 @@ describe("safety", () => {
 
   it("blocks prohibited safety text", () => {
     expect(validateSafetyText("forced sex scene").ok).toBe(false);
+  });
+
+  it("detects explicit adult intent outside adult mode", () => {
+    expect(detectAdultIntentOutsideAdultMode("давай перейдем к сексу", "CLASSIC").ok).toBe(false);
+    expect(detectAdultIntentOutsideAdultMode("давай перейдем к сексу", "ADULT").ok).toBe(true);
   });
 
   it("detects template AI language", () => {

@@ -26,6 +26,11 @@ const blockedPatterns: Array<[RegExp, string]> = [
   [/\b(паспорт|карта банка|адрес проживания|слить интим)\b/i, "Real private data or non-consensual intimate material is not allowed."]
 ];
 
+const adultIntentPatterns = [
+  /\b(sex|sexual|explicit|nude|naked|horny|undress|strip|blowjob|handjob|orgasm|penetrat|cum|cock|dick|pussy|clit|tits)\b/i,
+  /(секс|сексуальн|интим|эротик|возбуд|гол(ая|ый|ые)|раздев|снять одежду|трах|член|вагин|клитор|груд[ьи]|оргазм|конч|минет|куни|проникнов)/i
+];
+
 export function validateAdultGate(user: AgeGate, mode: RpMode): SafetyResult {
   if (mode !== "ADULT") return { ok: true };
   if (!user.ageVerifiedAt) {
@@ -59,6 +64,18 @@ export function validateSafetyText(input: string): SafetyResult {
     if (pattern.test(input)) {
       return { ok: false, code: "SAFETY_BLOCKED", reason };
     }
+  }
+  return { ok: true };
+}
+
+export function detectAdultIntentOutsideAdultMode(input: string, mode: RpMode): SafetyResult {
+  if (mode === "ADULT") return { ok: true };
+  if (adultIntentPatterns.some((pattern) => pattern.test(input))) {
+    return {
+      ok: false,
+      code: "ADULT_MODE_REQUIRED",
+      reason: "Explicit 18+ content is available only in 18+ mode."
+    };
   }
   return { ok: true };
 }
