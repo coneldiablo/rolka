@@ -1,5 +1,7 @@
 # Rolka
 
+[![CI](https://github.com/coneldiablo/rolka/actions/workflows/ci.yml/badge.svg)](https://github.com/coneldiablo/rolka/actions/workflows/ci.yml)
+
 Telegram + Web/Mini App roleplay bot with character cards, RP modes, context rescue, image generation, adult-only gate, and Free/Plus/Pro subscription limits.
 
 ## Stack
