@@ -179,6 +179,8 @@ const steps = [
 ];
 
 export default function Home() {
+  const telegramBotUrl = process.env.NEXT_PUBLIC_TELEGRAM_BOT_URL ?? "#pricing";
+
   return (
     <main className="site-shell">
       <section className="hero-section" aria-label="Вход в RP-мир">
@@ -409,7 +411,7 @@ export default function Home() {
             перенести память в новый чат.
           </p>
         </div>
-        <a className="button primary" href="/api/me">
+        <a className="button primary" href={telegramBotUrl}>
           Присоединиться
           <Flame size={18} aria-hidden="true" />
         </a>

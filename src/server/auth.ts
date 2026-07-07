@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { readTelegramInitData, verifyTelegramInitData } from "@/server/telegram-auth";
 
 function configuredAdminTelegramIds() {
   return new Set(
@@ -11,14 +12,27 @@ function configuredAdminTelegramIds() {
 
 export async function getCurrentUser(request: Request) {
   const url = new URL(request.url);
-  const telegramId =
-    request.headers.get("x-telegram-id") ??
-    url.searchParams.get("telegramId") ??
-    process.env.DEV_TELEGRAM_ID ??
-    "dev-user";
+  const initData = readTelegramInitData(request);
+  const isProduction = process.env.NODE_ENV === "production";
+  let telegramId: string | undefined;
+  let username: string | undefined;
+  let displayName: string | undefined;
 
-  const username = request.headers.get("x-telegram-username") ?? undefined;
-  const displayName = request.headers.get("x-telegram-name") ?? username ?? "Demo user";
+  if (initData) {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) throw new Error("TELEGRAM_BOT_TOKEN_REQUIRED");
+    const verified = verifyTelegramInitData(initData, token);
+    telegramId = verified.telegramId;
+    username = verified.username;
+    displayName = verified.displayName;
+  } else if (!isProduction) {
+    telegramId = request.headers.get("x-telegram-id") ?? url.searchParams.get("telegramId") ?? process.env.DEV_TELEGRAM_ID ?? "dev-user";
+    username = request.headers.get("x-telegram-username") ?? undefined;
+    displayName = request.headers.get("x-telegram-name") ?? username ?? "Demo user";
+  } else {
+    throw new Error("TELEGRAM_AUTH_REQUIRED");
+  }
+
   const isConfiguredAdmin = configuredAdminTelegramIds().has(telegramId);
 
   return prisma.user.upsert({

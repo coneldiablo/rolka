@@ -29,6 +29,8 @@ RUN npm ci --omit=dev
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/public ./public
 COPY --from=build /app/prisma ./prisma
+COPY --from=build /app/src ./src
+COPY --from=build /app/tsconfig.json ./tsconfig.json
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /app/next.config.ts ./next.config.ts
 EXPOSE 3000

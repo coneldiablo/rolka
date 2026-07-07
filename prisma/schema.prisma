@@ -89,6 +89,7 @@ model User {
   snapshots       ContextSnapshot[]
   moderation      ModerationEvent[]
   images          ImageGeneration[]
+  botSessions     BotSession[]
 }
 
 model Subscription {
@@ -122,6 +123,23 @@ model Payment {
 
   @@index([userId, status])
   @@index([providerPaymentId])
+  @@unique([provider, providerPaymentId])
+}
+
+model BotSession {
+  id           String   @id @default(cuid())
+  telegramId   String   @unique
+  userId       String?
+  awaiting     String?
+  draftJson    Json
+  activeChatId String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  user         User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activeChat   Chat?    @relation(fields: [activeChatId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([activeChatId])
 }
 
 model Character {
@@ -163,6 +181,7 @@ model Chat {
   messages         Message[]
   snapshots        ContextSnapshot[]
   images           ImageGeneration[]
+  botSessions      BotSession[]
 
   @@index([userId, status])
   @@index([userId, status, updatedAt])

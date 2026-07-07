@@ -2,16 +2,22 @@ services:
   app:
     build:
       context: .
-      target: prod
-    command: npm run start
+      target: dev
+    command: sh -c "npx prisma generate && npx prisma db push && npm run dev:docker"
     restart: unless-stopped
     env_file:
       - .env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-rolka}?schema=public
       REDIS_URL: redis://redis:6379
+      APP_URL: http://localhost:3000
+      TELEGRAM_MINI_APP_URL: http://localhost:3000
     ports:
       - "${APP_PORT:-3000}:3000"
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+      - next_cache:/app/.next
     depends_on:
       db:
         condition: service_healthy
@@ -21,7 +27,7 @@ services:
   bot:
     build:
       context: .
-      target: prod
+      target: dev
     command: npm run bot:polling
     restart: unless-stopped
     env_file:
@@ -29,11 +35,14 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-rolka}?schema=public
       REDIS_URL: redis://redis:6379
+      APP_URL: http://localhost:3000
+      TELEGRAM_MINI_APP_URL: http://localhost:3000
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      app:
+        condition: service_started
 
   db:
     image: postgres:16-alpine
@@ -81,5 +90,7 @@ services:
       retries: 20
 
 volumes:
+  node_modules:
+  next_cache:
   postgres_data:
   redis_data:

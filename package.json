@@ -7,7 +7,7 @@
     "dev": "next dev",
     "dev:docker": "next dev --hostname 0.0.0.0",
     "bot:polling": "tsx src/bot/polling.ts",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
@@ -28,6 +28,7 @@
     "openai": "^6.13.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
+    "tsx": "^4.21.0",
     "zod": "^4.2.1"
   },
   "devDependencies": {
@@ -37,7 +38,6 @@
     "eslint": "^9.39.2",
     "eslint-config-next": "^16.2.9",
     "prisma": "^6.19.0",
-    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.16"
   }

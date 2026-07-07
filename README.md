@@ -40,26 +40,42 @@ Docker is the recommended cross-platform setup for Windows, macOS, and Linux.
 cp .env.docker.example .env
 # fill TELEGRAM_BOT_TOKEN and AI provider keys in .env
 # change APP_PORT if 3000 is already busy
-docker compose up --build
+docker compose -f docker-compose.dev.yml up --build
 ```
 
-This starts:
+The dev compose starts:
 
 - `app`: Next.js dev server at `http://localhost:3000`
 - `bot`: Telegram bot in polling mode
 - `db`: PostgreSQL 16
 - `redis`: Redis 7
 
-The app container runs `prisma db push` on startup so a fresh local database is created from `prisma/schema.prisma`.
+The dev app container runs `prisma db push` on startup so a fresh local database is created from `prisma/schema.prisma`.
+
+For a fresh production database, run migrations separately and then start the default compose:
+
+```bash
+npx prisma migrate deploy
+docker compose up --build -d
+```
+
+If the database already exists from an older `prisma db push` setup, do not run `migrate deploy` first. Back it up, check that `Payment.providerPaymentId` has no duplicates, apply the current schema once, then mark the baseline migration as already applied:
+
+```bash
+npm run db:backup
+npx prisma db push --accept-data-loss
+npx prisma migrate resolve --applied 20260707141000_architecture_hardening_baseline
+docker compose up --build -d
+```
 
 Useful commands:
 
 ```bash
-docker compose logs -f app
-docker compose logs -f bot
+docker compose -f docker-compose.dev.yml logs -f app
+docker compose -f docker-compose.dev.yml logs -f bot
 npm run db:backup
-docker compose down
-docker compose down -v
+docker compose -f docker-compose.dev.yml down
+docker compose -f docker-compose.dev.yml down -v
 ```
 
 `npm run db:backup` runs `scripts/db-backup.sh` and writes a PostgreSQL custom-format dump to `backups/`. Keep these dumps outside the project folder if you need protection from accidental volume deletion or machine failure.

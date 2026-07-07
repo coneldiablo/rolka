@@ -14,6 +14,12 @@ export function handleApiError(error: unknown) {
     return jsonError("VALIDATION_ERROR", error.issues.map((issue) => issue.message).join("; "), 422);
   }
   if (error instanceof Error) {
+    if (error.message.startsWith("TELEGRAM_AUTH") || error.message === "TELEGRAM_BOT_TOKEN_REQUIRED") {
+      return jsonError(error.message, humanizeError(error.message), 401);
+    }
+    if (error.message === "CHAT_NOT_FOUND" || error.message === "CHARACTER_NOT_FOUND" || error.message === "USER_NOT_FOUND") {
+      return jsonError(error.message, humanizeError(error.message), 404);
+    }
     const status = error.message.endsWith("_REACHED") || error.message.includes("REQUIRES") ? 402 : 400;
     return jsonError(error.message, humanizeError(error.message), status);
   }
@@ -29,7 +35,14 @@ function humanizeError(code: string) {
     AGE_GATE_REQUIRED: "Confirm that you are 18+ before using adult mode.",
     LEGAL_ACCEPTANCE_REQUIRED: "Accept Terms and Privacy Policy before using adult mode.",
     ADULT_CHARACTER_AGE_REQUIRED: "All adult-mode characters must be 18+.",
-    SAFETY_BLOCKED: "This request violates the safety policy."
+    SAFETY_BLOCKED: "This request violates the safety policy.",
+    TELEGRAM_AUTH_REQUIRED: "Telegram authentication is required.",
+    TELEGRAM_AUTH_INVALID: "Telegram authentication is invalid.",
+    TELEGRAM_AUTH_EXPIRED: "Telegram authentication has expired.",
+    TELEGRAM_BOT_TOKEN_REQUIRED: "Telegram bot token is required for authentication.",
+    CHAT_NOT_FOUND: "Chat not found.",
+    CHARACTER_NOT_FOUND: "One or more characters do not exist.",
+    USER_NOT_FOUND: "User not found."
   };
   return messages[code] ?? code;
 }

@@ -5,6 +5,10 @@ import { createConfiguredTextProviders, generateWithFallback } from "@/domain/pr
 import { detectAdultIntentOutsideAdultMode, validateAdultCharacters, validateSafetyText } from "@/domain/safety";
 import type { RpMode } from "@/domain/modes";
 import { prisma } from "@/lib/prisma";
+import { loadBotSession, saveBotSession, clearBotSession } from "@/server/services/bot-session-service";
+import { recordSuccessfulTelegramStarsPaymentForTelegramUser } from "@/server/services/billing-service";
+import { createChatForUser, appendChatMessage } from "@/server/services/chat-service";
+import { findOrCreateCharacterForTelegramUser } from "@/server/services/character-service";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -62,6 +66,7 @@ type UserRuntimeProfile = {
 
 type ChatDraft = {
   awaiting: AwaitingInput;
+  activeChatId?: string;
   context?: string;
   sceneBrief?: string;
   userProfile?: string;
@@ -192,6 +197,16 @@ export function createBot() {
       return;
     }
     console.error("Telegram bot error", error.error);
+  });
+
+  bot.use(async (ctx, next) => {
+    await next();
+    if (!ctx.from?.id) return;
+    const state = chatStates.get(ctx.from.id);
+    if (!state) return;
+    await persistRuntimeSession(ctx.from.id, state).catch((error) => {
+      console.error("Failed to persist bot session", error);
+    });
   });
 
   bot.command("start", async (ctx) => {
@@ -356,6 +371,7 @@ export function createBot() {
     await ctx.answerCallbackQuery();
     const previousMode = getChatState(ctx.from.id).mode;
     resetChatState(ctx.from.id);
+    await clearBotSession(ctx.from.id);
     if (previousMode) getChatState(ctx.from.id).mode = previousMode;
     await ctx.editMessageText(newChatText(), {
       parse_mode: "HTML",
@@ -595,17 +611,37 @@ export function createBot() {
       return;
     }
     const completedOnboardingNow = !profile.onboardingCompleted;
-    profile.chatsStarted += 1;
-    profile.onboardingCompleted = true;
-    if (completedOnboardingNow) await markOnboardingCompleted(ctx.from.id);
-    state.active = true;
-    state.awaiting = null;
-    state.mode ??= "CLASSIC";
-    state.aiCharacter ??= generatedAiCharacter;
-    await ctx.editMessageText(chatReadyText(state, completedOnboardingNow), {
-      parse_mode: "HTML",
-      reply_markup: chatReadyKeyboard()
-    });
+    try {
+      const aiCharacter = await persistCharacterForTelegramUser(ctx.from.id, state.aiCharacter ?? generatedAiCharacter);
+      const user = await prisma.user.findUnique({ where: { telegramId: String(ctx.from.id) } });
+      if (!user) throw new Error("USER_NOT_FOUND");
+      state.mode ??= "CLASSIC";
+      state.aiCharacter = aiCharacter;
+      const chat = await createChatForUser(user.id, {
+        title: buildSavedChatTitle(state, new Date()),
+        mode: state.mode,
+        characterIds: [aiCharacter.id],
+        lorebook: state.userProfile,
+        memorySummary: state.sceneBrief,
+        importedContext: buildImportedContext(state)
+      });
+      state.activeChatId = chat.id;
+      state.active = true;
+      state.awaiting = null;
+      profile.chatsStarted = await countUserChats(user.id);
+      profile.onboardingCompleted = true;
+      if (completedOnboardingNow) await markOnboardingCompleted(ctx.from.id);
+      await persistRuntimeSession(ctx.from.id, state, user.id);
+      await ctx.editMessageText(chatReadyText(state, completedOnboardingNow), {
+        parse_mode: "HTML",
+        reply_markup: chatReadyKeyboard()
+      });
+    } catch (error) {
+      await ctx.editMessageText(error instanceof Error ? escapeHtml(error.message) : "Не удалось начать ролку.", {
+        parse_mode: "HTML",
+        reply_markup: mainMenuKeyboard()
+      });
+    }
   });
 
   bot.callbackQuery("stop_active_chat", async (ctx) => {
@@ -622,6 +658,7 @@ export function createBot() {
     const state = getChatState(ctx.from.id);
     state.active = false;
     state.awaiting = null;
+    await persistRuntimeSession(ctx.from.id, state);
     await ctx.editMessageText(stopText(state), {
       parse_mode: "HTML",
       reply_markup: stoppedChatKeyboard()
@@ -804,6 +841,8 @@ export function createBot() {
     state.active = false;
     state.awaiting = null;
     state.messages = [];
+    state.activeChatId = undefined;
+    await clearBotSession(ctx.from.id);
     await ctx.editMessageText(chatSavedAndExitedText(saved), {
       parse_mode: "HTML",
       reply_markup: chatsKeyboard(ctx.from.id)
@@ -821,7 +860,10 @@ export function createBot() {
 
   bot.callbackQuery("confirm_delete_active_chat", async (ctx) => {
     await ctx.answerCallbackQuery("Чат удален");
+    const state = getChatState(ctx.from.id);
+    if (state.activeChatId) await deletePersistedChat(ctx.from.id, state.activeChatId);
     resetChatState(ctx.from.id);
+    await clearBotSession(ctx.from.id);
     await ctx.editMessageText(activeChatDeletedText(), {
       parse_mode: "HTML",
       reply_markup: mainMenuKeyboard()
@@ -1024,11 +1066,13 @@ export function createBot() {
   bot.on("message:text", async (ctx) => {
     if (ctx.message.text.startsWith("/")) return;
     if (!ctx.from?.id) return;
+    await syncTelegramUser(ctx.from);
     const state = getChatState(ctx.from.id);
     if (state.awaiting) {
       await saveAwaitingInput(ctx.from.id, ctx.message.text, async (text, keyboard) => {
         await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
       });
+      await persistRuntimeSession(ctx.from.id, getChatState(ctx.from.id));
       return;
     }
     if (state.active) {
@@ -2355,6 +2399,7 @@ async function syncTelegramUser(from: TelegramFrom) {
   profile.onboardingCompleted = user.onboardingCompleted;
   profile.onboardingMessagesShown = Boolean(user.valueCheckpointShownAt);
   await loadPersistedProfileData(user.id, profile);
+  await loadPersistedBotSession(from.id);
   return user;
 }
 
@@ -2401,7 +2446,7 @@ async function markValueCheckpointShown(telegramUserId: number) {
 }
 
 async function loadPersistedProfileData(userId: string, profile: UserRuntimeProfile) {
-  const [characters, chats] = await Promise.all([
+  const [characters, chats, chatCount, adultMessageCount] = await Promise.all([
     prisma.character.findMany({
       where: { userId },
       orderBy: { createdAt: "asc" }
@@ -2414,7 +2459,9 @@ async function loadPersistedProfileData(userId: string, profile: UserRuntimeProf
         messages: { orderBy: { createdAt: "desc" }, take: 80 },
         characters: { include: { character: true } }
       }
-    })
+    }),
+    prisma.chat.count({ where: { userId, status: { not: "DELETED" } } }),
+    prisma.chat.aggregate({ where: { userId, status: { not: "DELETED" } }, _sum: { adultMessageCount: true } })
   ]);
 
   profile.characters = characters.map((character) => ({
@@ -2460,36 +2507,41 @@ async function loadPersistedProfileData(userId: string, profile: UserRuntimeProf
       userProfile: chat.lorebook ?? undefined
     };
   });
+  profile.chatsStarted = chatCount;
+  profile.adultMessages = adultMessageCount._sum.adultMessageCount ?? 0;
+}
+
+async function loadPersistedBotSession(telegramUserId: number) {
+  const session = await loadBotSession<ChatDraft>(telegramUserId);
+  if (!session) return;
+  chatStates.set(telegramUserId, {
+    awaiting: session.draft.awaiting ?? (session.awaiting as AwaitingInput) ?? null,
+    activeChatId: session.activeChatId ?? session.draft.activeChatId,
+    context: session.draft.context,
+    sceneBrief: session.draft.sceneBrief,
+    userProfile: session.draft.userProfile,
+    userProfileName: session.draft.userProfileName,
+    aiCharacter: session.draft.aiCharacter,
+    mode: session.draft.mode,
+    active: session.draft.active,
+    messages: session.draft.messages ?? []
+  });
+}
+
+async function persistRuntimeSession(telegramUserId: number, state: ChatDraft, userId?: string) {
+  await saveBotSession(telegramUserId, { ...state }, {
+    userId,
+    awaiting: state.awaiting,
+    activeChatId: state.activeChatId ?? null
+  });
+}
+
+async function countUserChats(userId: string) {
+  return prisma.chat.count({ where: { userId, status: { not: "DELETED" } } });
 }
 
 async function recordSuccessfulPayment(telegramUserId: number, plan: Exclude<Plan, "FREE">, chargeId: string, payload: string) {
-  const user = await prisma.user.findUnique({ where: { telegramId: String(telegramUserId) } });
-  if (!user) return;
-  const existing = await prisma.payment.findFirst({ where: { providerPaymentId: chargeId } });
-  if (existing) return;
-  const endsAt = new Date();
-  endsAt.setMonth(endsAt.getMonth() + 1);
-  await prisma.payment.create({
-    data: {
-      userId: user.id,
-      provider: "TELEGRAM_STARS",
-      providerPaymentId: chargeId,
-      plan,
-      amount: getPlanPriceStars(plan),
-      currency: "XTR",
-      status: "PAID",
-      payload: { payload }
-    }
-  });
-  await prisma.subscription.create({
-    data: {
-      userId: user.id,
-      plan,
-      status: "ACTIVE",
-      startsAt: new Date(),
-      endsAt
-    }
-  });
+  await recordSuccessfulTelegramStarsPaymentForTelegramUser(telegramUserId, plan, chargeId, { payload });
 }
 
 async function grantPlanByTelegramId(telegramId: string, plan: Plan) {
@@ -2754,15 +2806,27 @@ async function saveCurrentChat(userId: number, state: ChatDraft): Promise<SavedC
   const aiCharacter = await persistCharacterForTelegramUser(userId, state.aiCharacter ?? generatedAiCharacter);
   const user = await prisma.user.findUnique({ where: { telegramId: String(userId) } });
   const title = buildSavedChatTitle(state, savedAt);
-  let persistedChatId = createRuntimeId();
-  if (user) {
+  let persistedChatId = state.activeChatId ?? createRuntimeId();
+  if (user && state.activeChatId) {
+    await prisma.chat.updateMany({
+      where: { id: state.activeChatId, userId: user.id },
+      data: {
+        title,
+        mode: state.mode ?? "CLASSIC",
+        importedContext: buildImportedContext(state),
+        memorySummary: state.sceneBrief,
+        lorebook: state.userProfile,
+        updatedAt: savedAt
+      }
+    });
+  } else if (user) {
     const chat = await prisma.chat.create({
       data: {
         userId: user.id,
         title,
         mode: state.mode ?? "CLASSIC",
         status: "ACTIVE",
-        importedContext: state.context,
+        importedContext: buildImportedContext(state),
         memorySummary: state.sceneBrief,
         lorebook: state.userProfile,
         characters: {
@@ -2796,47 +2860,8 @@ async function saveCurrentChat(userId: number, state: ChatDraft): Promise<SavedC
 }
 
 async function persistCharacterForTelegramUser(userId: number, character: PromptCharacter): Promise<SavedCharacter> {
-  const user = await prisma.user.findUnique({ where: { telegramId: String(userId) } });
-  if (!user) return { ...character, id: createRuntimeId() };
-
-  const existing = await prisma.character.findFirst({
-    where: {
-      userId: user.id,
-      name: character.name,
-      description: character.description
-    },
-    orderBy: { createdAt: "desc" }
-  });
-  if (existing) {
-    return {
-      id: existing.id,
-      name: existing.name,
-      age: existing.age,
-      description: existing.description,
-      appearance: existing.appearance,
-      personality: existing.personality,
-      speechStyle: existing.speechStyle,
-      setting: existing.setting,
-      boundaries: existing.boundaries,
-      starterScene: existing.starterScene
-    };
-  }
-
-  const created = await prisma.character.create({
-    data: {
-      userId: user.id,
-      name: character.name,
-      age: character.age,
-      description: character.description,
-      appearance: character.appearance,
-      personality: character.personality,
-      speechStyle: character.speechStyle,
-      setting: character.setting,
-      boundaries: character.boundaries,
-      starterScene: character.starterScene,
-      isAdultReady: character.age >= 18
-    }
-  });
+  const created = await findOrCreateCharacterForTelegramUser(userId, character);
+  if (!created) return { ...character, id: createRuntimeId() };
   return {
     id: created.id,
     name: created.name,
@@ -3001,6 +3026,13 @@ async function handleActiveChatMessage(
     const redirectText = nonAdultModeRedirectText(state);
     state.messages.push({ role: "user", content });
     state.messages.push({ role: "assistant", content: redirectText });
+    const user = state.activeChatId ? await prisma.user.findUnique({ where: { telegramId: String(userId) } }) : null;
+    if (user && state.activeChatId) {
+      await appendChatMessage({ userId: user.id, chatId: state.activeChatId, role: "user", content });
+      await appendChatMessage({ userId: user.id, chatId: state.activeChatId, role: "assistant", content: redirectText });
+      await prisma.chat.update({ where: { id: state.activeChatId }, data: { updatedAt: new Date() } });
+    }
+    await persistRuntimeSession(userId, state, user?.id);
     await reply(redirectText, nonAdultModeRedirectKeyboard());
     return;
   }
@@ -3010,6 +3042,12 @@ async function handleActiveChatMessage(
   }
 
   state.messages.push({ role: "user", content });
+  let persistedUserMessageId: string | undefined;
+  const user = state.activeChatId ? await prisma.user.findUnique({ where: { telegramId: String(userId) } }) : null;
+  if (user && state.activeChatId) {
+    const persistedUserMessage = await appendChatMessage({ userId: user.id, chatId: state.activeChatId, role: "user", content });
+    persistedUserMessageId = persistedUserMessage.id;
+  }
   await sendAction("typing");
 
   try {
@@ -3025,7 +3063,25 @@ async function handleActiveChatMessage(
     });
     const answer = clampTelegramText(response.content || "Пустой ответ от модели. Попробуй отправить сообщение еще раз.");
     state.messages.push({ role: "assistant", content: answer });
+    if (user && state.activeChatId) {
+      await appendChatMessage({
+        userId: user.id,
+        chatId: state.activeChatId,
+        role: "assistant",
+        content: answer,
+        provider: response.provider,
+        model: response.model
+      });
+      await prisma.chat.update({
+        where: { id: state.activeChatId },
+        data: {
+          updatedAt: new Date(),
+          adultMessageCount: state.mode === "ADULT" ? { increment: 1 } : undefined
+        }
+      });
+    }
     if (state.mode === "ADULT") profile.adultMessages += 1;
+    await persistRuntimeSession(userId, state, user?.id);
     const shouldShowCheckpoint =
       profile.plan === "FREE" && !profile.onboardingMessagesShown && state.messages.length >= 6;
     if (shouldShowCheckpoint) {
@@ -3038,6 +3094,10 @@ async function handleActiveChatMessage(
   } catch (error) {
     console.error("AI chat failed", { chatId, error });
     state.messages.pop();
+    if (persistedUserMessageId) {
+      await prisma.message.deleteMany({ where: { id: persistedUserMessageId } });
+    }
+    await persistRuntimeSession(userId, state, user?.id);
     await reply(
       "Не получилось получить ответ от AI API. AITUNNEL иногда отвечает с задержкой или timeout. Попробуй еще раз через несколько секунд.",
       chatReadyKeyboard()
