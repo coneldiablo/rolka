@@ -1,5 +1,6 @@
 import { PLAN_LIMITS } from "@/domain/plans";
 import type { RpMode } from "@/domain/modes";
+import { prisma } from "@/lib/prisma";
 import type { ChatDraft, UserRuntimeProfile } from "./types";
 
 export function escapeHtml(value: string) {
@@ -72,11 +73,17 @@ export function createRuntimeId() {
   return `local_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function confirmAdult(profile: UserRuntimeProfile) {
+export async function confirmAdult(profile: UserRuntimeProfile, telegramUserId?: number) {
   const now = new Date();
   profile.ageVerifiedAt = now;
   profile.termsAcceptedAt = now;
   profile.privacyAcceptedAt = now;
+  if (telegramUserId) {
+    await prisma.user.updateMany({
+      where: { telegramId: String(telegramUserId) },
+      data: { ageVerifiedAt: now, termsAcceptedAt: now, privacyAcceptedAt: now }
+    });
+  }
 }
 
 export function isAdultConfirmed(profile: UserRuntimeProfile) {

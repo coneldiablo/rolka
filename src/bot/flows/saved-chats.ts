@@ -2,17 +2,17 @@ import { prisma } from "@/lib/prisma";
 import { Bot } from "grammy";
 import { generatedAiCharacter } from "../catalog";
 import {
-  chatConfirmKeyboard,
+  chatReadyKeyboard,
   chatsKeyboard,
   deleteChatKeyboard,
   savedChatKeyboard
 } from "../keyboards";
-import { chatStates, getChatState, getUserProfile } from "../sessions";
+import { chatStates, getChatState, getUserProfile, persistRuntimeSession } from "../sessions";
 import {
+  chatReadyText,
   chatsText,
   deleteChatText,
   savedChatContextText,
-  savedChatContinueText,
   savedChatText
 } from "../texts";
 import type { ChatDraft, SavedChat, TelegramFrom } from "../types";
@@ -76,10 +76,13 @@ export function registerSavedChatsFlow(bot: Bot, deps: SavedChatsFlowDeps) {
       });
       return;
     }
-    restoreSavedChat(ctx.from.id, chat);
-    await ctx.editMessageText(savedChatContinueText(chat), {
+    await deps.syncTelegramUser(ctx.from);
+    const state = restoreSavedChat(ctx.from.id, chat);
+    const user = await prisma.user.findUnique({ where: { telegramId: String(ctx.from.id) } });
+    await persistRuntimeSession(ctx.from.id, state, user?.id);
+    await ctx.editMessageText(chatReadyText(state), {
       parse_mode: "HTML",
-      reply_markup: chatConfirmKeyboard()
+      reply_markup: chatReadyKeyboard()
     });
   });
 
@@ -177,9 +180,11 @@ export async function deletePersistedChat(telegramUserId: number, chatId: string
 }
 
 export function restoreSavedChat(userId: number, chat: SavedChat) {
+  const activeChatId = chat.id.startsWith("local_") ? undefined : chat.id;
   const state: ChatDraft = {
     awaiting: null,
-    active: false,
+    active: true,
+    activeChatId,
     context: buildSavedChatImportedContext(chat),
     sceneBrief: chat.sceneBrief,
     userProfile: chat.userProfile,
@@ -198,7 +203,7 @@ export function restoreSavedChat(userId: number, chat: SavedChat) {
 
 export function buildSavedChatTitle(state: ChatDraft, savedAt: Date) {
   const character = state.aiCharacter?.name ?? generatedAiCharacter.name;
-  return `${character} В· ${formatDateTime(savedAt)}`;
+  return `${character} · ${formatDateTime(savedAt)}`;
 }
 
 function buildSavedChatImportedContext(chat: SavedChat) {

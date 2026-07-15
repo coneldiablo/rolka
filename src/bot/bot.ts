@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from "grammy";
+﻿import { Bot, InlineKeyboard } from "grammy";
 import type { Plan } from "@/domain/plans";
 import type { RpMode } from "@/domain/modes";
 import { prisma } from "@/lib/prisma";
@@ -71,7 +71,7 @@ export function createBot() {
       await syncTelegramUser(ctx.from);
       resetChatState(ctx.from.id);
     }
-    await ctx.reply(profile?.onboardingCompleted ? startText(ctx.from?.first_name) : onboardingStartText(ctx.from?.first_name), {
+    await ctx.reply(profile?.onboardingCompleted ? "Главное меню Rolka:" : "Сначала пройди короткое обучение, оно займет около минуты.", {
       parse_mode: "HTML",
       reply_markup: profile?.onboardingCompleted ? mainMenuKeyboard() : onboardingStartKeyboard()
     });
@@ -81,8 +81,8 @@ export function createBot() {
     await ctx.answerCallbackQuery("Возраст подтвержден");
     if (!ctx.from?.id) return;
     const profile = getUserProfile(ctx.from.id);
-    confirmAdult(profile);
     await syncTelegramUser(ctx.from);
+    await confirmAdult(profile, ctx.from.id);
     resetChatState(ctx.from.id);
     await ctx.editMessageText(profile.onboardingCompleted ? startText(ctx.from.first_name) : onboardingStartText(ctx.from.first_name), {
       parse_mode: "HTML",
@@ -93,7 +93,7 @@ export function createBot() {
   bot.command("menu", async (ctx) => {
     const profile = ctx.from?.id ? getUserProfile(ctx.from.id) : null;
     if (ctx.from?.id) await syncTelegramUser(ctx.from);
-    await ctx.reply(profile?.onboardingCompleted ? "Главное меню Rolka:" : "Сначала пройди короткое обучение — оно займет около минуты.", {
+    await ctx.reply(profile?.onboardingCompleted ? "Главное меню Rolka:" : "Сначала пройди короткое обучение, оно займет около минуты.", {
       parse_mode: "HTML",
       reply_markup: profile?.onboardingCompleted ? mainMenuKeyboard() : onboardingStartKeyboard()
     });
@@ -169,7 +169,7 @@ export function createBot() {
     if (!(await isAdminUser(ctx.from.id))) return;
     const [, telegramId, plan] = ctx.callbackQuery.data.split(":") as [string, string, Plan];
     await grantPlanByTelegramId(telegramId, plan);
-    await ctx.answerCallbackQuery(`Доступ ${plan} выдан`);
+    await ctx.answerCallbackQuery("Тариф выдан");
     await ctx.editMessageText(await adminUserText(telegramId), {
       parse_mode: "HTML",
       reply_markup: adminUserKeyboard(telegramId)
@@ -238,6 +238,9 @@ async function syncTelegramUser(from: TelegramFrom) {
   profile.plan = user.isAdmin ? "PRO" : await getActivePlan(user.id);
   profile.onboardingCompleted = user.onboardingCompleted;
   profile.onboardingMessagesShown = Boolean(user.valueCheckpointShownAt);
+  profile.ageVerifiedAt = user.ageVerifiedAt ?? undefined;
+  profile.termsAcceptedAt = user.termsAcceptedAt ?? undefined;
+  profile.privacyAcceptedAt = user.privacyAcceptedAt ?? undefined;
   await loadPersistedProfileData(user.id, profile);
   await loadPersistedBotSession(from.id);
   return user;
@@ -285,7 +288,7 @@ async function loadPersistedProfileData(userId: string, profile: UserRuntimeProf
         characters: { include: { character: true } }
       }
     }),
-    prisma.chat.count({ where: { userId, status: { not: "DELETED" } } }),
+    prisma.chat.count({ where: { userId, status: { not: "DELETED" }, messages: { some: {} } } }),
     prisma.chat.aggregate({ where: { userId, status: { not: "DELETED" } }, _sum: { adultMessageCount: true } })
   ]);
 

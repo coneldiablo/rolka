@@ -24,7 +24,7 @@ export type SendChatMessageInput = {
 
 export async function createChatForUser(userId: string, input: CreateChatInput) {
   const plan = await getCurrentPlan(userId);
-  const count = await prisma.chat.count({ where: { userId, status: { not: "DELETED" } } });
+  const count = await prisma.chat.count({ where: { userId, status: { not: "DELETED" }, messages: { some: {} } } });
   assertCanCreateChat(plan, count);
 
   const user = await prisma.user.findUnique({ where: { id: userId } });

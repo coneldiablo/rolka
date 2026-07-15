@@ -286,6 +286,13 @@ export function registerNewChatFlow(bot: Bot, deps: NewChatFlowDeps) {
     await ctx.answerCallbackQuery();
     const state = getChatState(ctx.from.id);
     const profile = getUserProfile(ctx.from.id);
+    if (state.active && state.activeChatId) {
+      await ctx.editMessageText(chatReadyText(state), {
+        parse_mode: "HTML",
+        reply_markup: chatReadyKeyboard()
+      });
+      return;
+    }
     const startCheck = canStartChat(profile, state);
     if (!startCheck.ok) {
       await ctx.editMessageText(startCheck.message, {
@@ -350,7 +357,8 @@ export function registerNewChatFlow(bot: Bot, deps: NewChatFlowDeps) {
 
   bot.callbackQuery("adult_accept_chat", async (ctx) => {
     await ctx.answerCallbackQuery("18+ подтверждено");
-    confirmAdult(getUserProfile(ctx.from.id));
+    await deps.syncTelegramUser(ctx.from);
+    await confirmAdult(getUserProfile(ctx.from.id), ctx.from.id);
     const state = getChatState(ctx.from.id);
     state.mode = "ADULT";
     state.awaiting = null;
@@ -441,7 +449,7 @@ function canStartChat(profile: UserRuntimeProfile, state: ChatDraft) {
 }
 
 async function countUserChats(userId: string) {
-  return prisma.chat.count({ where: { userId, status: { not: "DELETED" } } });
+  return prisma.chat.count({ where: { userId, status: { not: "DELETED" }, messages: { some: {} } } });
 }
 
 async function markOnboardingCompleted(telegramUserId: number) {

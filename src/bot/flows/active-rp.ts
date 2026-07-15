@@ -225,7 +225,8 @@ export function registerActiveRpFlow(bot: Bot, deps: ActiveRpFlowDeps) {
 
   bot.callbackQuery("adult_accept", async (ctx) => {
     await ctx.answerCallbackQuery("18+ подтверждено");
-    confirmAdult(getUserProfile(ctx.from.id));
+    await deps.syncTelegramUser(ctx.from);
+    await confirmAdult(getUserProfile(ctx.from.id), ctx.from.id);
     await ctx.reply(
       "✅ <b>Возраст и согласие отмечены.</b>\n\n18+ режим доступен для взрослых вымышленных персонажей. Запрещенные категории все равно блокируются safety-фильтром.",
       { parse_mode: "HTML", reply_markup: mainMenuKeyboard() }
@@ -279,7 +280,7 @@ export function registerActiveRpFlow(bot: Bot, deps: ActiveRpFlowDeps) {
       });
       return;
     }
-    await ctx.reply("Сейчас нет активного RP-чата. Нажми «Новый чат», чтобы начать.", {
+      await ctx.reply("Сейчас нет активного RP-чата. Нажми «Новый чат», чтобы начать.", {
       parse_mode: "HTML",
       reply_markup: mainMenuKeyboard()
     });

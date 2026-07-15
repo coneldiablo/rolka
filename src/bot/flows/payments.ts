@@ -1,4 +1,4 @@
-import { getPlanPriceStars, type Plan } from "@/domain/plans";
+﻿import { getPlanPriceStars, type Plan } from "@/domain/plans";
 import { Bot } from "grammy";
 import { mainMenuKeyboard, subscriptionKeyboard } from "../keyboards";
 import { getChatState, getUserProfile } from "../sessions";
@@ -41,7 +41,7 @@ export function registerPaymentsFlow(bot: Bot, deps: PaymentsFlowDeps) {
     await ctx.answerCallbackQuery();
     await ctx.replyWithInvoice(
       "Rolka Pro",
-      "Премиум модели, priority queue, long memory, lorebook и больше генераций фото.",
+      "Премиум-модели, priority queue, long memory, lorebook и больше генераций фото.",
       "SUBSCRIPTION_PRO",
       "XTR",
       [{ label: "Rolka Pro", amount: getPlanPriceStars("PRO") }]
